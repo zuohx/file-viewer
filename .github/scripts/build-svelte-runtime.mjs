@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { createRequire } from 'node:module'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const index = process.argv.indexOf('--package-root')
 assert.ok(index >= 0 && process.argv[index + 1], 'A normal owner package root is required')
@@ -13,8 +13,11 @@ const full = manifest.name === '@file-viewer/svelte-full'
 assert.ok(full || manifest.name === '@file-viewer/svelte', 'Unexpected Svelte owner package')
 assert.equal(manifest.peerDependencies.svelte, '>=3.59 <6')
 // Resolve esbuild from the owner package so the builder also works when it is copied
-// outside the workspace root (public CI ships it under .github/scripts).
-const { build } = await import(createRequire(join(root, 'package.json')).resolve('esbuild'))
+// outside the workspace root (public CI ships it under .github/scripts). The resolved
+// path is a native absolute path, which only the file: URL scheme can import on Windows.
+const { build } = await import(
+  pathToFileURL(createRequire(join(root, 'package.json')).resolve('esbuild')).href
+)
 const runtimeHelper = fileURLToPath(new URL('./lib/svelte-runtime-component.mjs', import.meta.url))
 const controller = full ? '@file-viewer/svelte/controller' : '@file-viewer/core/browser'
 const fullImports = full

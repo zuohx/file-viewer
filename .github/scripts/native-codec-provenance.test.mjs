@@ -12,9 +12,10 @@ import {
 } from 'node:fs'
 import { createRequire } from 'node:module'
 import { createHash } from 'node:crypto'
-import { dirname, join, relative, resolve, sep } from 'node:path'
+import { dirname, join, parse, relative, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import {
+  installationPathSpellings,
   verifyCodecArtifact,
   verifyCodecLockIntegrity,
   verifyCodecSourceLicenses,
@@ -40,6 +41,41 @@ const codecRoot = (artifact) => {
   throw new Error(`Unable to locate the installed native codec ${artifact.name}`)
 }
 const lockfile = readFileSync(join(root, 'pnpm-lock.yaml'), 'utf8')
+
+// A fixture that verifies shims has to live on the install's own volume: a
+// cross-volume relative path degrades to an absolute one, which changes the
+// reviewed shape of the wrapper instead of just its installation path.
+const shimFixtureBase =
+  parse(tmpdir()).root === parse(root).root ? tmpdir() : join(root, 'node_modules')
+const shimFixtureRoot = (prefix) => mkdtempSync(join(shimFixtureBase, prefix))
+
+// Only installation paths may vary, so a relocated fixture has to rewrite every
+// spelling of the old target to the matching spelling of the new one - including
+// the cmd wrapper, which spells its relative target with backslashes, and the
+// Windows companions, which carry the same paths as the POSIX wrapper.
+const relocateBinShims = ({ artifact, sourceDir, destinationDir, providerDir }) => {
+  for (const record of artifact.installationGeneratedBinShims) {
+    const sourceShim = join(sourceDir, record.path)
+    const providerBin = join(providerDir, record.providerBin.path)
+    const suffixes = [
+      '',
+      ...(record.windowsCompanions ?? []).map((entry) => entry.path.slice(record.path.length))
+    ]
+    for (const suffix of suffixes) {
+      const shim = join(destinationDir, record.path + suffix)
+      if (!existsSync(shim)) continue
+      const from = installationPathSpellings(relative(dirname(sourceShim), providerBin))
+      const to = installationPathSpellings(relative(dirname(shim), providerBin))
+      let relocated = readFileSync(shim, 'utf8')
+      for (const [oldSpelling, newSpelling] of from
+        .map((spelling, index) => [spelling, to[index] ?? to[0]])
+        .sort(([left], [right]) => right.length - left.length)) {
+        relocated = relocated.replaceAll(oldSpelling, newSpelling)
+      }
+      writeFileSync(shim, relocated)
+    }
+  }
+}
 
 test('all five installed codec artifacts and official lockfile integrities match', () => {
   assert.equal(provenance.wrapperArtifacts.length, 5)
@@ -172,7 +208,7 @@ test('SDK installation boundary rejects unknown files and changed generated shim
   const provider = dirname(
     createRequire(join(original, 'package.json')).resolve('@kitware/vtk.js/package.json')
   )
-  const temp = mkdtempSync(join(tmpdir(), 'file-viewer-sdk-boundary-'))
+  const temp = shimFixtureRoot('.sdk-boundary-')
   const directory = join(temp, 'sdk')
   try {
     cpSync(original, directory, { recursive: true })
@@ -180,22 +216,12 @@ test('SDK installation boundary rejects unknown files and changed generated shim
     // stays outside the SDK boundary; every entry inside that boundary is checked.
     mkdirSync(join(temp, 'node_modules/@kitware'), { recursive: true })
     symlinkSync(provider, join(temp, 'node_modules/@kitware/vtk.js'), 'dir')
-    for (const record of artifact.installationGeneratedBinShims) {
-      const sourceShim = join(original, record.path)
-      const shim = join(directory, record.path)
-      const target = join(provider, record.providerBin.path)
-      let relocated = readFileSync(sourceShim, 'utf8')
-      const alias = join(dirname(dirname(original)), record.provider, record.providerBin.path)
-      for (const spelling of new Set([alias, target])) {
-        relocated = relocated
-          .replaceAll(
-            relative(dirname(sourceShim), spelling).split(sep).join('/'),
-            relative(dirname(shim), target).split(sep).join('/')
-          )
-          .replaceAll(spelling, target)
-      }
-      writeFileSync(shim, relocated)
-    }
+    relocateBinShims({
+      artifact,
+      sourceDir: original,
+      destinationDir: directory,
+      providerDir: provider
+    })
     verifyCodecArtifact(directory, artifact)
     const unknown = join(directory, 'node_modules/.bin/unreviewed')
     writeFileSync(unknown, '#!/bin/sh\nexit 0\n')
@@ -206,6 +232,16 @@ test('SDK installation boundary rejects unknown files and changed generated shim
     writeFileSync(shim, Buffer.concat([shimBytes, Buffer.from('\n# unreviewed change\n')]))
     assert.throws(() => verifyCodecArtifact(directory, artifact), /shim bytes drifted/)
     writeFileSync(shim, shimBytes)
+    // pnpm only writes the cmd/PowerShell companions on Windows, so their pin
+    // is exercised wherever the install actually produced them.
+    for (const companion of artifact.installationGeneratedBinShims[0].windowsCompanions ?? []) {
+      const file = join(directory, companion.path)
+      if (!existsSync(file)) continue
+      const companionBytes = readFileSync(file)
+      writeFileSync(file, Buffer.concat([companionBytes, Buffer.from('\r\n@REM unreviewed\r\n')]))
+      assert.throws(() => verifyCodecArtifact(directory, artifact), /shim bytes drifted/)
+      writeFileSync(file, companionBytes)
+    }
     const published = join(directory, 'dist/esm/index.js')
     const bytes = readFileSync(published)
     const changed = Buffer.from(bytes)
@@ -227,34 +263,19 @@ test('SDK bin aliases must still point to the verified provider', () => {
   const provider = dirname(
     createRequire(join(original, 'package.json')).resolve('@kitware/vtk.js/package.json')
   )
-  const temp = mkdtempSync(join(tmpdir(), 'file-viewer-sdk-alias-'))
+  const temp = shimFixtureRoot('.sdk-alias-')
   const directory = join(temp, 'node_modules/@cornerstonejs/core')
   const alias = join(temp, 'node_modules/@kitware/vtk.js')
   try {
     cpSync(original, directory, { recursive: true })
     mkdirSync(dirname(alias), { recursive: true })
     symlinkSync(provider, alias, 'dir')
-    for (const record of artifact.installationGeneratedBinShims) {
-      const sourceShim = join(original, record.path)
-      const target = join(provider, record.providerBin.path)
-      const originalAlias = join(
-        dirname(dirname(original)),
-        record.provider,
-        record.providerBin.path
-      )
-      let relocated = readFileSync(sourceShim, 'utf8')
-      for (const spelling of new Set([originalAlias, target])) {
-        relocated = relocated
-          .replaceAll(
-            relative(dirname(sourceShim), spelling).split(sep).join('/'),
-            relative(dirname(join(directory, record.path)), target)
-              .split(sep)
-              .join('/')
-          )
-          .replaceAll(spelling, target)
-      }
-      writeFileSync(join(directory, record.path), relocated)
-    }
+    relocateBinShims({
+      artifact,
+      sourceDir: original,
+      destinationDir: directory,
+      providerDir: provider
+    })
     verifyCodecArtifact(directory, artifact)
     const replacement = join(temp, 'replacement')
     cpSync(provider, replacement, { recursive: true })

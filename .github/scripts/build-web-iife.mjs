@@ -1,11 +1,11 @@
 import { existsSync } from 'node:fs'
 import { mkdir } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { createRequire } from 'node:module'
-import { writeBundleInventory } from '../packages/build-support/bundle-inventory.mjs'
-import { writeBundleNotices } from '../packages/build-support/bundle-notices.mjs'
-import { bundleInputPlugin } from '../packages/build-support/rollup-bundle-inputs.mjs'
+import { writeBundleInventory } from '../../packages/build-support/bundle-inventory.mjs'
+import { writeBundleNotices } from '../../packages/build-support/bundle-notices.mjs'
+import { bundleInputPlugin } from '../../packages/build-support/rollup-bundle-inputs.mjs'
 
 const scriptDir = dirname(fileURLToPath(import.meta.url))
 const sourceRoot = resolve(scriptDir, '../..')
@@ -23,7 +23,9 @@ if (!existsSync(entry)) {
 
 await mkdir(outDir, { recursive: true })
 
-const { build } = await import(requireFromPackage.resolve('vite'))
+// The resolved entry is a native absolute path, which only the file: URL scheme
+// can import on Windows.
+const { build } = await import(pathToFileURL(requireFromPackage.resolve('vite')).href)
 
 await build({
   configFile: false,

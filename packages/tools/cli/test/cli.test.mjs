@@ -17,8 +17,9 @@ import {
 } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, isAbsolute, join, resolve } from 'node:path'
 import test from 'node:test'
+import { fileURLToPath } from 'node:url'
 import {
   createFileViewerInstallPlan,
   doctorFileViewerProject,
@@ -38,6 +39,13 @@ import {
   updateFileViewerProjectSelection
 } from '../dist/index.js'
 import { installFileViewerStandardAssets } from '@file-viewer/assets-standard'
+
+// Failure-injection tests shadow a package manager with a POSIX executable shim on
+// PATH. Windows cannot execute an extensionless shim (or a .cmd file) without a
+// shell, and the CLI deliberately spawns without one, so those fixtures are
+// POSIX-only and the tests that depend on them skip there.
+const posixExecutableShim =
+  process.platform === 'win32' && 'requires a POSIX executable shim on PATH'
 
 const releaseCatalog = JSON.parse(
   await readFile(new URL('../catalog/catalog.json', import.meta.url), 'utf8')
@@ -287,7 +295,7 @@ test('Yarn Classic and Berry use generation-correct install settings and scaffol
       'https://registry.example.test/'
     )
     assert.equal(classic.steps[0].args.includes('--network-concurrency'), true)
-    assert.match(classic.steps[0].env.YARN_CACHE_FOLDER, /\.cache\/file-viewer$/)
+    assert.equal(classic.steps[0].env.YARN_CACHE_FOLDER, join(root, '.cache', 'file-viewer'))
     assert.equal(classic.steps[0].env.YARN_NETWORK_CONCURRENCY, undefined)
 
     const loopbackClassic = await createFileViewerInstallPlan(
@@ -336,7 +344,7 @@ test('Yarn Classic and Berry use generation-correct install settings and scaffol
     assert.equal(berry.steps[0].env.YARN_NETWORK_CONCURRENCY, '6')
     assert.equal(berry.steps[0].env.YARN_CHILD_CONCURRENCY, undefined)
     assert.equal(berry.steps[0].env.YARN_ENABLE_GLOBAL_CACHE, 'true')
-    assert.match(berry.steps[0].env.YARN_GLOBAL_FOLDER, /\.cache\/file-viewer$/)
+    assert.equal(berry.steps[0].env.YARN_GLOBAL_FOLDER, join(root, '.cache', 'file-viewer'))
     assert.equal(berry.steps[0].env.YARN_CACHE_FOLDER, undefined)
     assert.equal(berry.steps[0].env.npm_config_proxy, undefined)
     assert.equal(berry.steps[0].env.NO_PROXY, undefined)
@@ -382,6 +390,10 @@ test('Yarn Classic and Berry use generation-correct install settings and scaffol
 })
 
 test('registry preparation is bounded and uses explicit cache settings without a shell', async () => {
+  // Production resolves every plan path, so the fixture roots have to be resolved
+  // the same way to stay comparable on platforms that carry a drive prefix.
+  const pnpmRoot = resolve('/tmp/file-viewer-project')
+  const yarnRoot = resolve('/tmp/file-viewer-yarn-project')
   const plan = await createFileViewerInstallPlan(
     {
       framework: 'react',
@@ -393,7 +405,7 @@ test('registry preparation is bounded and uses explicit cache settings without a
         concurrency: 4
       }
     },
-    { packageManager: 'pnpm', projectRoot: '/tmp/file-viewer-project' }
+    { packageManager: 'pnpm', projectRoot: pnpmRoot }
   )
   assert.deepEqual(plan.steps[0].args.slice(0, 9), [
     'add',
@@ -402,7 +414,7 @@ test('registry preparation is bounded and uses explicit cache settings without a
     '--registry',
     'https://registry.example.invalid/npm/',
     '--store-dir',
-    '/tmp/file-viewer-project/.cache/file-viewer',
+    join(pnpmRoot, '.cache', 'file-viewer'),
     '--network-concurrency',
     '4'
   ])
@@ -417,7 +429,7 @@ test('registry preparation is bounded and uses explicit cache settings without a
         concurrency: 3
       }
     },
-    { packageManager: 'yarn', projectRoot: '/tmp/file-viewer-yarn-project' }
+    { packageManager: 'yarn', projectRoot: yarnRoot }
   )
   assert.equal(yarnPlan.steps[0].args.includes('--registry'), true)
   assert.equal(
@@ -430,7 +442,7 @@ test('registry preparation is bounded and uses explicit cache settings without a
     yarnPlan.steps[0].env.YARN_NPM_REGISTRY_SERVER,
     'https://registry.example.invalid/npm/'
   )
-  assert.equal(yarnPlan.steps[0].env.YARN_CACHE_FOLDER, '/tmp/file-viewer-yarn-project/.cache/yarn')
+  assert.equal(yarnPlan.steps[0].env.YARN_CACHE_FOLDER, join(yarnRoot, '.cache', 'yarn'))
 })
 
 test('quickstart scaffold is runnable-shaped, idempotent, and fails before partial writes on conflicts', async () => {
@@ -768,7 +780,10 @@ export const copyFileViewerAssets = async ({ targetDir }) => {
             ? `file-viewer-copy-assets-${manifest.version}.tgz`
             : `file-viewer-web-${manifest.version}.tgz`
       const archive = join(offline, filename)
-      const packed = spawnSync('tar', ['-czf', archive, '-C', join(stage, '..'), 'package'], {
+      // A Windows drive letter in an argument makes GNU tar treat "C:" as a
+      // remote host, so the archive is named relative to its own directory.
+      const packed = spawnSync('tar', ['-czf', filename, '-C', join(stage, '..'), 'package'], {
+        cwd: offline,
         encoding: 'utf8'
       })
       assert.equal(packed.status, 0, packed.stderr)
@@ -891,11 +906,11 @@ export const copyFileViewerAssets = async ({ targetDir }) => {
       true
     )
     await writeFile(join(root, 'package.json'), JSON.stringify({ dependencies: offlineDependencies }))
-    const cli = new URL('../dist/cli.js', import.meta.url)
+    const cli = fileURLToPath(new URL('../dist/cli.js', import.meta.url))
     const tuned = spawnSync(
       process.execPath,
       [
-        cli.pathname,
+        cli,
         'install',
         '--project',
         root,
@@ -912,7 +927,7 @@ export const copyFileViewerAssets = async ({ targetDir }) => {
     assert.equal(tuned.status, 0, tuned.stderr)
     const tunedResult = JSON.parse(tuned.stdout)
     assert.equal(
-      tunedResult.plan.packageSpecs.every((spec) => spec.startsWith('/')),
+      tunedResult.plan.packageSpecs.every((spec) => isAbsolute(spec)),
       true
     )
     assert.equal(tunedResult.plan.steps[0].args.includes('--offline'), true)
@@ -920,7 +935,7 @@ export const copyFileViewerAssets = async ({ targetDir }) => {
     const offlineTarget = join(root, 'offline-copy-target')
     const offlineCopy = spawnSync(
       process.execPath,
-      [cli.pathname, 'copy-assets', '--project', root, '--offline-dir', offline, offlineTarget],
+      [cli, 'copy-assets', '--project', root, '--offline-dir', offline, offlineTarget],
       {
         cwd: root,
         encoding: 'utf8',
@@ -940,7 +955,7 @@ export const copyFileViewerAssets = async ({ targetDir }) => {
     await symlink(offline, offlineLink)
     const linkedDirectory = spawnSync(
       process.execPath,
-      [cli.pathname, 'copy-assets', '--project', root, '--offline-dir', offlineLink, offlineTarget],
+      [cli, 'copy-assets', '--project', root, '--offline-dir', offlineLink, offlineTarget],
       { cwd: root, encoding: 'utf8', shell: false }
     )
     assert.equal(linkedDirectory.status, 1)
@@ -952,7 +967,7 @@ export const copyFileViewerAssets = async ({ targetDir }) => {
     await symlink(physicalManifestPath, manifestPath)
     const linkedManifest = spawnSync(
       process.execPath,
-      [cli.pathname, 'copy-assets', '--project', root, '--offline-dir', offline, offlineTarget],
+      [cli, 'copy-assets', '--project', root, '--offline-dir', offline, offlineTarget],
       { cwd: root, encoding: 'utf8', shell: false }
     )
     assert.equal(linkedManifest.status, 1)
@@ -988,7 +1003,7 @@ export const copyFileViewerAssets = async ({ targetDir }) => {
     await symlink(physicalCarrierArchive, carrierArchive)
     const linkedCarrier = spawnSync(
       process.execPath,
-      [cli.pathname, 'copy-assets', '--project', root, '--offline-dir', offline, offlineTarget],
+      [cli, 'copy-assets', '--project', root, '--offline-dir', offline, offlineTarget],
       { cwd: root, encoding: 'utf8', shell: false }
     )
     assert.equal(linkedCarrier.status, 1)
@@ -1011,7 +1026,7 @@ export const copyFileViewerAssets = async ({ targetDir }) => {
     )
     const dependencyMismatch = spawnSync(
       process.execPath,
-      [cli.pathname, 'copy-assets', '--project', root, '--offline-dir', offline, offlineTarget],
+      [cli, 'copy-assets', '--project', root, '--offline-dir', offline, offlineTarget],
       { cwd: root, encoding: 'utf8', shell: false }
     )
     assert.equal(dependencyMismatch.status, 1)
@@ -1066,7 +1081,7 @@ export const copyFileViewerAssets = async ({ targetDir }) => {
   }
 })
 
-test('prepare builds and reuses an atomic verified File Viewer-owned closure', async () => {
+test('prepare builds and reuses an atomic verified File Viewer-owned closure', { skip: posixExecutableShim }, async () => {
   const root = await mkdtemp(join(tmpdir(), 'file-viewer-prepare-'))
   const fixtureDir = join(root, 'fixtures')
   const binDir = join(root, 'bin')
@@ -1088,11 +1103,12 @@ test('prepare builds and reuses an atomic verified File Viewer-owned closure', a
       await mkdir(stage, { recursive: true })
       await writeFile(join(stage, 'package.json'), JSON.stringify(manifest))
       const filename = `${key}-2.4.0.tgz`
-      const packed = spawnSync(
-        'tar',
-        ['-czf', join(fixtureDir, filename), '-C', join(stage, '..'), 'package'],
-        { encoding: 'utf8' }
-      )
+      // A Windows drive letter in an argument makes GNU tar treat "C:" as a
+      // remote host, so the archive is named relative to its own directory.
+      const packed = spawnSync('tar', ['-czf', filename, '-C', join(stage, '..'), 'package'], {
+        cwd: fixtureDir,
+        encoding: 'utf8'
+      })
       assert.equal(packed.status, 0, packed.stderr)
     }
     const fakeNpm = join(binDir, 'npm')
@@ -1431,10 +1447,10 @@ test('packageManager metadata wins over lockfiles and add detects an existing fu
     )
     await writeFile(join(root, 'package-lock.json'), '{}')
     assert.equal(detectPackageManager(root), 'pnpm')
-    const cli = new URL('../dist/cli.js', import.meta.url)
+    const cli = fileURLToPath(new URL('../dist/cli.js', import.meta.url))
     const inspected = spawnSync(
       process.execPath,
-      [cli.pathname, 'add', root, '--non-interactive', '--json'],
+      [cli, 'add', root, '--non-interactive', '--json'],
       {
         cwd: root,
         encoding: 'utf8',
@@ -1471,11 +1487,11 @@ test('multiple package-manager lockfiles fail closed until the manager is explic
       /Multiple package-manager lockfiles.*--package-manager explicitly/
     )
 
-    const cli = new URL('../dist/cli.js', import.meta.url)
+    const cli = fileURLToPath(new URL('../dist/cli.js', import.meta.url))
     const explicit = spawnSync(
       process.execPath,
       [
-        cli.pathname,
+        cli,
         'plan',
         '--project',
         root,
@@ -1537,11 +1553,11 @@ test('existing Yarn Berry without packageManager metadata stays Berry', async ()
       },
       { write: true }
     )
-    const cli = new URL('../dist/cli.js', import.meta.url)
+    const cli = fileURLToPath(new URL('../dist/cli.js', import.meta.url))
     const result = spawnSync(
       process.execPath,
       [
-        cli.pathname,
+        cli,
         'add',
         root,
         '--asset-target',
@@ -1565,7 +1581,7 @@ test('existing Yarn Berry without packageManager metadata stays Berry', async ()
     const ambiguous = spawnSync(
       process.execPath,
       [
-        cli.pathname,
+        cli,
         'add',
         root,
         '--asset-target',
@@ -1611,10 +1627,10 @@ test('add inspection preserves configured defaults before any non-interactive pl
         assetBaseUrl: 'https://cdn.example.test/file-viewer/'
       })
     )
-    const cli = new URL('../dist/cli.js', import.meta.url)
+    const cli = fileURLToPath(new URL('../dist/cli.js', import.meta.url))
     const result = spawnSync(
       process.execPath,
-      [cli.pathname, 'add', root, '--non-interactive', '--json'],
+      [cli, 'add', root, '--non-interactive', '--json'],
       {
         cwd: root,
         encoding: 'utf8',
@@ -1651,7 +1667,7 @@ test(
           dependencies: { vue: '3.5.31', '@file-viewer/vue3-full': '2.4.0' }
         })
       )
-      const cli = new URL('../dist/cli.js', import.meta.url)
+      const cli = fileURLToPath(new URL('../dist/cli.js', import.meta.url))
       // Two shapes this script has to survive. `eof` needs an explicit action:
       // without it Tcl reads the next word as that action, the switch loses its
       // timeout arm, and an unanswered prompt leaves expect blocked in `wait`
@@ -1683,7 +1699,7 @@ exit [lindex $result 3]
         env: {
           ...process.env,
           FILE_VIEWER_TEST_NODE: process.execPath,
-          FILE_VIEWER_TEST_CLI: cli.pathname,
+          FILE_VIEWER_TEST_CLI: cli,
           FILE_VIEWER_TEST_ROOT: root
         }
       })
@@ -1703,7 +1719,7 @@ exit [lindex $result 3]
   }
 )
 
-test('explicit asset target unblocks target-only adapters while unresolved adapters fail before side effects', async () => {
+test('explicit asset target unblocks target-only adapters while unresolved adapters fail before side effects', { skip: posixExecutableShim }, async () => {
   const root = await mkdtemp(join(tmpdir(), 'file-viewer-adapter-write-'))
   const bin = join(root, 'bin')
   const fakeNpm = join(bin, 'npm')
@@ -1718,7 +1734,7 @@ process.exit(7);
 `
     )
     await chmod(fakeNpm, 0o755)
-    const cli = new URL('../dist/cli.js', import.meta.url)
+    const cli = fileURLToPath(new URL('../dist/cli.js', import.meta.url))
     for (const [name, manifest, configFile] of [
       ['unknown', { private: true }, null],
       [
@@ -1769,7 +1785,7 @@ process.exit(7);
         PATH: `${bin}:${process.env.PATH}`,
         FILE_VIEWER_NPM_CALLS: calls
       }
-      const blocked = spawnSync(process.execPath, [cli.pathname, ...common], {
+      const blocked = spawnSync(process.execPath, [cli, ...common], {
         cwd: project,
         encoding: 'utf8',
         shell: false,
@@ -1786,7 +1802,7 @@ process.exit(7);
 
       const continued = spawnSync(
         process.execPath,
-        [cli.pathname, ...common, '--asset-target', 'public/file-viewer'],
+        [cli, ...common, '--asset-target', 'public/file-viewer'],
         { cwd: project, encoding: 'utf8', shell: false, env }
       )
       assert.equal(continued.status, 1)
@@ -1821,11 +1837,11 @@ test('non-interactive add fails closed on unresolved framework, profile, and ent
         }
       })
     )
-    const cli = new URL('../dist/cli.js', import.meta.url)
+    const cli = fileURLToPath(new URL('../dist/cli.js', import.meta.url))
     const invoke = (extra) =>
       spawnSync(
         process.execPath,
-        [cli.pathname, 'add', root, '--non-interactive', '--json', ...extra],
+        [cli, 'add', root, '--non-interactive', '--json', ...extra],
         {
           cwd: root,
           encoding: 'utf8',
@@ -1857,8 +1873,8 @@ test('non-interactive add fails closed on unresolved framework, profile, and ent
 })
 
 test('all four help locales expose the same flags and global version is command-independent', async () => {
-  const cli = new URL('../dist/cli.js', import.meta.url)
-  const copyAssetsBin = new URL('../dist/copy-assets.js', import.meta.url)
+  const cli = fileURLToPath(new URL('../dist/cli.js', import.meta.url))
+  const copyAssetsBin = fileURLToPath(new URL('../dist/copy-assets.js', import.meta.url))
   const flagSets = []
   const semanticMarkers = {
     en: ['Project root', 'Offline preparation', 'Force mutating workflows'],
@@ -1867,7 +1883,7 @@ test('all four help locales expose the same flags and global version is command-
     'de-DE': ['Projektwurzel', 'Offline-Vorbereitung', 'Erzwingt für Änderungen']
   }
   for (const locale of ['en', 'zh-CN', 'ja-JP', 'de-DE']) {
-    const help = spawnSync(process.execPath, [cli.pathname, '--help', '--lang', locale], {
+    const help = spawnSync(process.execPath, [cli, '--help', '--lang', locale], {
       encoding: 'utf8',
       shell: false
     })
@@ -1902,7 +1918,7 @@ test('all four help locales expose the same flags and global version is command-
 
     const legacyHelp = spawnSync(
       process.execPath,
-      [cli.pathname, 'copy-assets', '--help', '--lang', locale],
+      [cli, 'copy-assets', '--help', '--lang', locale],
       { encoding: 'utf8', shell: false }
     )
     assert.equal(legacyHelp.status, 0, legacyHelp.stderr)
@@ -1925,7 +1941,7 @@ test('all four help locales expose the same flags and global version is command-
 
     const directLegacyHelp = spawnSync(
       process.execPath,
-      [copyAssetsBin.pathname, '--help', '--lang', locale],
+      [copyAssetsBin, '--help', '--lang', locale],
       { encoding: 'utf8', shell: false }
     )
     assert.equal(directLegacyHelp.status, 0, directLegacyHelp.stderr)
@@ -1939,14 +1955,14 @@ test('all four help locales expose the same flags and global version is command-
     ['de', 'Projektwurzel'],
     ['en-US', 'Project root']
   ]) {
-    const help = spawnSync(process.execPath, [cli.pathname, '--lang', alias, '--help'], {
+    const help = spawnSync(process.execPath, [cli, '--lang', alias, '--help'], {
       encoding: 'utf8',
       shell: false
     })
     assert.equal(help.status, 0, help.stderr)
     assert.match(help.stdout, new RegExp(marker))
   }
-  const unsupportedLocale = spawnSync(process.execPath, [cli.pathname, '--help', '--lang', 'fr'], {
+  const unsupportedLocale = spawnSync(process.execPath, [cli, '--help', '--lang', 'fr'], {
     encoding: 'utf8',
     shell: false
   })
@@ -1954,14 +1970,16 @@ test('all four help locales expose the same flags and global version is command-
   assert.match(unsupportedLocale.stderr, /Unsupported language fr/)
   assert.doesNotMatch(unsupportedLocale.stderr, /TypeError/)
   for (const argv of [['--version'], ['create', '--version'], ['doctor', '--version']]) {
-    const version = spawnSync(process.execPath, [cli.pathname, ...argv], {
+    const version = spawnSync(process.execPath, [cli, ...argv], {
       encoding: 'utf8',
       shell: false
     })
     assert.equal(version.status, 0, version.stderr)
     assert.equal(version.stdout.trim(), cliPackageVersion)
   }
-  const assetsHelp = spawnSync(process.execPath, [cli.pathname, 'assets', '--help'], {
+  // The default language follows the host locale, so the English contract has to
+  // be requested explicitly to stay deterministic on non-English machines.
+  const assetsHelp = spawnSync(process.execPath, [cli, 'assets', '--help', '--lang', 'en'], {
     encoding: 'utf8',
     shell: false
   })
@@ -1971,10 +1989,10 @@ test('all four help locales expose the same flags and global version is command-
 })
 
 test('prepare rejects concurrency above eight before registry access while installs retain one-to-thirty-two', async () => {
-  const cli = new URL('../dist/cli.js', import.meta.url)
+  const cli = fileURLToPath(new URL('../dist/cli.js', import.meta.url))
   const rejected = spawnSync(
     process.execPath,
-    [cli.pathname, 'prepare', '--registry', 'http://127.0.0.1:9', '--concurrency', '9', '--yes'],
+    [cli, 'prepare', '--registry', 'http://127.0.0.1:9', '--concurrency', '9', '--yes'],
     {
       encoding: 'utf8',
       shell: false
@@ -1984,7 +2002,7 @@ test('prepare rejects concurrency above eight before registry access while insta
   assert.match(rejected.stderr, /prepare --concurrency must be an integer from 1 to 8/)
   const preview = spawnSync(
     process.execPath,
-    [cli.pathname, 'prepare', '--registry', 'https://registry.example.test', '--json'],
+    [cli, 'prepare', '--registry', 'https://registry.example.test', '--json'],
     { encoding: 'utf8', shell: false }
   )
   assert.equal(preview.status, 0, preview.stderr)
@@ -2028,7 +2046,7 @@ test('--dry-run wins over mutation flags for every mutating workflow', async () 
   const root = await mkdtemp(join(tmpdir(), 'file-viewer-dry-run-'))
   const bin = join(root, 'bin')
   const calls = join(root, 'calls.log')
-  const cli = new URL('../dist/cli.js', import.meta.url)
+  const cli = fileURLToPath(new URL('../dist/cli.js', import.meta.url))
   try {
     await mkdir(bin)
     await writeFile(
@@ -2045,7 +2063,7 @@ test('--dry-run wins over mutation flags for every mutating workflow', async () 
     const created = spawnSync(
       process.execPath,
       [
-        cli.pathname,
+        cli,
         'create',
         fresh,
         '--framework',
@@ -2112,7 +2130,7 @@ test('--dry-run wins over mutation flags for every mutating workflow', async () 
         '--json'
       ]
     ]) {
-      const result = spawnSync(process.execPath, [cli.pathname, ...command], {
+      const result = spawnSync(process.execPath, [cli, ...command], {
         cwd: existing,
         encoding: 'utf8',
         shell: false,
@@ -2125,7 +2143,7 @@ test('--dry-run wins over mutation flags for every mutating workflow', async () 
     await mkdir(bare)
     const bareAssets = spawnSync(
       process.execPath,
-      [cli.pathname, 'assets', '--project', bare, '--write', '--dry-run', '--json'],
+      [cli, 'assets', '--project', bare, '--write', '--dry-run', '--json'],
       { cwd: bare, encoding: 'utf8', shell: false, env }
     )
     assert.equal(bareAssets.status, 0, bareAssets.stderr)
@@ -2139,7 +2157,7 @@ test('--dry-run wins over mutation flags for every mutating workflow', async () 
   }
 })
 
-test('failed create removes only a brand-new partially scaffolded target', async () => {
+test('failed create removes only a brand-new partially scaffolded target', { skip: posixExecutableShim }, async () => {
   const root = await mkdtemp(join(tmpdir(), 'file-viewer-create-rollback-'))
   const bin = join(root, 'bin')
   const target = join(root, 'new-project')
@@ -2148,11 +2166,11 @@ test('failed create removes only a brand-new partially scaffolded target', async
     const fakeNpm = join(bin, 'npm')
     await writeFile(fakeNpm, '#!/usr/bin/env node\nprocess.exit(7)\n')
     await chmod(fakeNpm, 0o755)
-    const cli = new URL('../dist/cli.js', import.meta.url)
+    const cli = fileURLToPath(new URL('../dist/cli.js', import.meta.url))
     const failed = spawnSync(
       process.execPath,
       [
-        cli.pathname,
+        cli,
         'create',
         target,
         '--framework',
@@ -2184,7 +2202,7 @@ test('failed create removes only a brand-new partially scaffolded target', async
     const preserved = spawnSync(
       process.execPath,
       [
-        cli.pathname,
+        cli,
         'create',
         existing,
         '--framework',
@@ -2215,7 +2233,7 @@ test('failed create removes only a brand-new partially scaffolded target', async
     const emptyFailure = spawnSync(
       process.execPath,
       [
-        cli.pathname,
+        cli,
         'create',
         empty,
         '--framework',
@@ -2249,7 +2267,7 @@ test('failed create removes only a brand-new partially scaffolded target', async
     const forceFailure = spawnSync(
       process.execPath,
       [
-        cli.pathname,
+        cli,
         'create',
         forced,
         '--framework',
@@ -2327,7 +2345,7 @@ process.exit(0);
     const assetsFailure = spawnSync(
       process.execPath,
       [
-        cli.pathname,
+        cli,
         'create',
         assetsTarget,
         '--framework',
@@ -2402,7 +2420,7 @@ process.exit(0);
     )
     const installAssetsFailure = spawnSync(
       process.execPath,
-      [cli.pathname, 'install', '--project', assetsTarget, '--yes', '--json'],
+      [cli, 'install', '--project', assetsTarget, '--yes', '--json'],
       {
         cwd: root,
         encoding: 'utf8',
@@ -2478,10 +2496,10 @@ test('copy-assets alias uses the embedded web-full carrier when the standalone p
       join(packageRoot, 'scripts/copy-assets.mjs'),
       '#!/usr/bin/env node\nprocess.stdout.write(JSON.stringify({ source: "embedded-web-full", args: process.argv.slice(2) }) + "\\n")\n'
     )
-    const cli = new URL('../dist/cli.js', import.meta.url)
+    const cli = fileURLToPath(new URL('../dist/cli.js', import.meta.url))
     const result = spawnSync(
       process.execPath,
-      [cli.pathname, 'copy-assets', '--project', root, 'static/file-viewer'],
+      [cli, 'copy-assets', '--project', root, 'static/file-viewer'],
       {
         cwd: root,
         encoding: 'utf8',
@@ -2496,7 +2514,7 @@ test('copy-assets alias uses the embedded web-full carrier when the standalone p
     })
     const protectedBareAssets = spawnSync(
       process.execPath,
-      [cli.pathname, 'assets', '--project', root],
+      [cli, 'assets', '--project', root],
       { cwd: root, encoding: 'utf8', shell: false }
     )
     assert.equal(protectedBareAssets.status, 0, protectedBareAssets.stderr)
@@ -2512,7 +2530,7 @@ test('copy-assets alias uses the embedded web-full carrier when the standalone p
     await symlink(outsideBin, embeddedBin)
     const symlinkedBin = spawnSync(
       process.execPath,
-      [cli.pathname, 'copy-assets', '--project', root, 'static/file-viewer'],
+      [cli, 'copy-assets', '--project', root, 'static/file-viewer'],
       { cwd: root, encoding: 'utf8', shell: false }
     )
     assert.equal(symlinkedBin.status, 1)
@@ -2526,7 +2544,7 @@ test('copy-assets alias uses the embedded web-full carrier when the standalone p
     await writeFile(manifestPath, JSON.stringify(manifest))
     const escapingBin = spawnSync(
       process.execPath,
-      [cli.pathname, 'copy-assets', '--project', root, 'static/file-viewer'],
+      [cli, 'copy-assets', '--project', root, 'static/file-viewer'],
       { cwd: root, encoding: 'utf8', shell: false }
     )
     assert.equal(escapingBin.status, 1)

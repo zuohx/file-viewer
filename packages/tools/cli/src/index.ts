@@ -521,7 +521,10 @@ export async function resolveFileViewerOfflinePackages(
     return relation === '' || (!relation.startsWith('..') && !isAbsolute(relation))
   }
   const inspectTarballManifest = (path: string) => {
-    const result = spawnSync('tar', ['-xOf', path, 'package/package.json'], {
+    // Naming the archive relative to its own directory keeps a Windows drive
+    // letter out of the argument list, where GNU tar reads "C:" as a remote host.
+    const result = spawnSync('tar', ['-xOf', basename(path), 'package/package.json'], {
+      cwd: dirname(path),
       encoding: 'utf8',
       shell: false,
       maxBuffer: 2 * 1024 * 1024

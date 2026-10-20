@@ -5,6 +5,7 @@ import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promis
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
+import { fileURLToPath } from 'node:url'
 import { copyFileViewerAssets, parseCopyAssetsCliArguments } from '../dist/index.js'
 
 test('uses transactional merge by default', () => {
@@ -57,10 +58,12 @@ test('accepts machine-readable output mode', () => {
 test('CLI emits exactly one JSON result object when requested', async () => {
   const targetDir = await mkdtemp(join(tmpdir(), 'file-viewer-copy-assets-json-'))
   try {
-    const cli = new URL('../dist/cli.js', import.meta.url)
+    // A file URL's pathname keeps the leading slash before a Windows drive
+    // letter, so the spawn argument has to come from fileURLToPath.
+    const cli = fileURLToPath(new URL('../dist/cli.js', import.meta.url))
     const result = spawnSync(
       process.execPath,
-      [cli.pathname, targetDir, '--renderers', 'office-word-openxml', '--json'],
+      [cli, targetDir, '--renderers', 'office-word-openxml', '--json'],
       { encoding: 'utf8', shell: false }
     )
     assert.equal(result.status, 0, result.stderr)
