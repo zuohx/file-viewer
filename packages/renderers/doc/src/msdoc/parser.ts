@@ -6,6 +6,7 @@ import { parseFib } from './fib.js';
 import { readChpxRuns, readPapxRuns, type ChpxRun } from './fkp.js';
 import { parseFonts } from './fonts.js';
 import { parseHtmlWordDocumentStream } from './html-word.js';
+import { parseLists } from './lists.js';
 import { extractObjectPool, extractPictureAsset } from './objects.js';
 import {
   applyTableStateToCells,
@@ -15,6 +16,7 @@ import {
   tablePropsToState,
 } from './properties.js';
 import { mergePropertyArrays, parseStyles, splitPropertiesByKind } from './styles.js';
+import { mapSymbolGlyph } from './symbols.js';
 import type {
   AttachmentAsset,
   CharSegment,
@@ -25,10 +27,13 @@ import type {
   FontsCollection,
   InlineNode,
   MsDocAsset,
+  MsDocListDefinition,
+  MsDocListTable,
   MsDocParseOptions,
   MsDocParseResult,
   ObjectPoolInfo,
   ParagraphBlock,
+  ParagraphListMarker,
   ParagraphModel,
   ParagraphRange,
   ParsedFib,
@@ -310,9 +315,13 @@ function buildInlineNodes(segments: CharSegment[], resolveAsset: (charState: Cha
         continue;
       }
 
+      const cleaned = cleanTextControlChars(ch);
+      // Symbol faces (Wingdings/Symbol) are addressed through private-use code
+      // points that browsers render as tofu; substitute a Unicode glyph.
+      const codePoint = cleaned.codePointAt(0) ?? 0;
       emitInline(fieldStack, output, {
         type: 'text',
-        text: cleanTextControlChars(ch),
+        text: codePoint >= 0xe000 ? mapSymbolGlyph(cleaned, segment.state.fontFamily) : cleaned,
         style: segment.state,
       });
     }
@@ -599,6 +608,133 @@ function resolveTableGridBorders(rows: TableRowBlock[]): void {
   });
 }
 
+const ROMAN_UNITS: Array<[number, string]> = [
+  [1000, 'm'], [900, 'cm'], [500, 'd'], [400, 'cd'], [100, 'c'], [90, 'xc'],
+  [50, 'l'], [40, 'xl'], [10, 'x'], [9, 'ix'], [5, 'v'], [4, 'iv'], [1, 'i'],
+];
+
+function formatRomanNumber(value: number, upperCase: boolean): string {
+  let remaining = Math.max(1, Math.min(value, 3999));
+  let text = '';
+  for (const [amount, numeral] of ROMAN_UNITS) {
+    while (remaining >= amount) {
+      text += numeral;
+      remaining -= amount;
+    }
+  }
+  return upperCase ? text.toUpperCase() : text;
+}
+
+function formatLetterCounter(value: number, upperCase: boolean): string {
+  const index = Math.max(1, value);
+  if (index <= 26) {
+    const letter = String.fromCharCode(0x61 + index - 1);
+    return upperCase ? letter.toUpperCase() : letter;
+  }
+  // Word repeats the letter (aa, bb, ...) instead of the spreadsheet style.
+  const letter = String.fromCharCode(0x61 + ((index - 1) % 26));
+  const repeat = Math.ceil(index / 26);
+  const text = letter.repeat(Math.min(repeat, 8));
+  return upperCase ? text.toUpperCase() : text;
+}
+
+const ENCLOSED_DIGITS = '①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳';
+
+/** Renders one counter value in the numbering format MS-DOC declares. */
+function formatListCounter(value: number, format: number): string {
+  switch (format) {
+    case 1: return formatRomanNumber(value, true);
+    case 2: return formatRomanNumber(value, false);
+    case 3: return formatLetterCounter(value, true);
+    case 4: return formatLetterCounter(value, false);
+    case 8: return value.toString(16).toUpperCase();
+    case 18:
+    case 28: return ENCLOSED_DIGITS[value - 1] ?? String(value);
+    case 22: return String(value).padStart(2, '0');
+    case 26: return `${value}．`;
+    case 27: return `(${value})`;
+    case 30: return String(value);
+    default: return String(value);
+  }
+}
+
+/**
+ * Expands a numbering template such as "第\u0001章" or "\u0003." where \u0001..\u0009
+ * address the counter of the matching list level.
+ */
+function expandNumberingTemplate(
+  template: string,
+  counters: number[],
+  definition: MsDocListDefinition,
+): string {
+  let text = '';
+  for (const character of template) {
+    const codePoint = character.codePointAt(0) ?? 0;
+    if (codePoint >= 1 && codePoint <= 9) {
+      const index = codePoint - 1;
+      const level = definition.levels[index];
+      const value = counters[index] || level?.startAt || 1;
+      text += formatListCounter(value, level?.format ?? 0);
+      continue;
+    }
+    text += character;
+  }
+  return text;
+}
+
+function resolveListMarker(
+  definition: MsDocListDefinition,
+  levelIndex: number,
+  counters: number[],
+): ParagraphListMarker | null {
+  const level = definition.levels[levelIndex];
+  if (!level) return null;
+  if (level.format === 255) return null;
+  const isBullet = level.format === 23;
+  const source = isBullet
+    ? level.char || '\u2022'
+    : level.char || `${String.fromCharCode(levelIndex + 1)}.`;
+  const expanded = isBullet ? source : expandNumberingTemplate(source, counters, definition);
+  const mapped = [...expanded]
+    .map(character => mapSymbolGlyph(character, level.font))
+    .join('')
+    .trim();
+  if (!mapped) return null;
+  return {
+    text: mapped,
+    level: levelIndex,
+    kind: isBullet ? 'bullet' : 'number',
+    sourceFont: level.font,
+  };
+}
+
+/**
+ * Resolves the list marker of every paragraph in document order, which is what
+ * makes multi-level counters come out right. Paragraphs without a usable list
+ * reference are left untouched.
+ */
+function applyListMarkers(paragraphs: ParagraphModel[], lists: MsDocListTable): void {
+  if (!Object.keys(lists).length) return;
+  const counters = new Map<string, number[]>();
+  for (const paragraph of paragraphs) {
+    const listId = paragraph.paraState.listId;
+    if (!listId) continue;
+    const definition = lists[String(listId)];
+    if (!definition || !definition.levels.length) continue;
+    const levelIndex = Math.min(
+      Math.max(paragraph.paraState.listLevel ?? 0, 0),
+      definition.levels.length - 1,
+    );
+    const series = counters.get(String(listId)) ?? new Array(9).fill(0);
+    const startAt = definition.levels[levelIndex]?.startAt || 1;
+    series[levelIndex] = series[levelIndex] ? series[levelIndex] + 1 : startAt;
+    for (let index = levelIndex + 1; index < series.length; index += 1) series[index] = 0;
+    counters.set(String(listId), series);
+    const marker = resolveListMarker(definition, levelIndex, series);
+    if (marker) paragraph.listMarker = marker;
+  }
+}
+
 function paragraphToBlock(paragraph: ParagraphModel): ParagraphBlock {
   return {
     type: 'paragraph',
@@ -608,6 +744,7 @@ function paragraphToBlock(paragraph: ParagraphModel): ParagraphBlock {
     paraState: paragraph.paraState,
     inlines: paragraph.inlines,
     text: paragraph.text,
+    listMarker: paragraph.listMarker,
     paragraphMark: paragraph.paragraphMark,
     storyKind: paragraph.storyKind,
   };
@@ -831,6 +968,7 @@ export function parseMsDoc(input: ArrayBuffer | Uint8Array | ArrayBufferView, op
 
   const styles = parseStyles(tableBytes, fib.fibRgFcLcb);
   const fonts = parseFonts(tableBytes, fib.fibRgFcLcb);
+  const lists = parseLists(tableBytes, fib.fibRgFcLcb, fonts, warnings);
   const relevantStoryEnd = Math.max(mainStory.cpEnd, ...supplementalTextStories.map((story) => story.cpEnd));
   const chpxRuns = readChpxRuns(wordBytes, tableBytes, fib, clx)
     .filter((run) => run.cpStart < relevantStoryEnd)
@@ -869,6 +1007,7 @@ export function parseMsDoc(input: ArrayBuffer | Uint8Array | ArrayBufferView, op
   });
 
   normalizeRowEndOnlyTables(paragraphs);
+  applyListMarkers(paragraphs, lists);
   const blocks = buildBlocks(paragraphs);
   const trailingAttachments = Array.from(objectPool.values())
     .filter((item) => item?.attachment && !usedAttachmentNames.has(item.entry.name))
@@ -910,5 +1049,6 @@ export function parseMsDoc(input: ArrayBuffer | Uint8Array | ArrayBufferView, op
     })),
     blocks,
     assets,
+    ...(Object.keys(lists).length ? { lists } : {}),
   };
 }

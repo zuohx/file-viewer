@@ -14,6 +14,7 @@ import type {
   MsDocRenderOptions,
   MsDocRenderResult,
   ParagraphBlock,
+  ParagraphListMarker,
   TableBlock,
   TableCellBlock,
   ShadingSpec,
@@ -179,9 +180,16 @@ function paragraphStyleToCss(paraState: ParagraphBlock['paraState']): CssStyleOb
   };
   const marginTop = twipsToPx(paraState.spacingBefore);
   const marginBottom = twipsToPx(paraState.spacingAfter);
-  const marginLeft = twipsToPx(paraState.leftIndent);
+  // A negative left indent moves the whole block outside its cell, so clamp it.
+  const leftIndentTwips = Math.max(0, paraState.leftIndent || 0);
+  const marginLeft = twipsToPx(leftIndentTwips);
   const marginRight = twipsToPx(paraState.rightIndent);
-  const textIndent = twipsToPx(paraState.firstLineIndent);
+  // Word lets a hanging first line start left of the indent; HTML clips it at
+  // the container edge, which cuts the first characters off list items. Keep
+  // the hanging indent only while the line still starts inside the container.
+  const hangingTwips = paraState.firstLineIndent || 0;
+  const firstLineTwips = leftIndentTwips + hangingTwips < 0 ? -leftIndentTwips : hangingTwips;
+  const textIndent = twipsToPx(firstLineTwips);
   if (marginTop) style['margin-top'] = `${marginTop}px`;
   if (marginBottom) style['margin-bottom'] = `${marginBottom}px`;
   if (marginLeft) style['margin-left'] = `${marginLeft}px`;
@@ -451,15 +459,26 @@ function reviewParagraphs(paragraphs: ParagraphBlock[], context: RenderContext):
   return result;
 }
 
+function renderListMarker(marker: ParagraphListMarker): string {
+  // The glyph has already been translated to Unicode; these faces carry the
+  // geometric shapes and dingbats that Word bullets rely on.
+  const style = styleObjectToCss({
+    'font-family': '"Segoe UI Symbol","Apple Symbols","Noto Sans Symbols 2","Noto Sans",sans-serif',
+  });
+  return `<span class="msdoc-list-marker" aria-hidden="true"${style ? ` style="${style}"` : ''}>${escapeHtml(marker.text)}</span>`;
+}
+
 function renderParagraphBlock(block: ParagraphBlock, context: RenderContext, options: { inline?: boolean } = {}): string {
   const tag = options.inline ? 'div' : 'p';
   const style = styleObjectToCss(paragraphStyleToCss(block.paraState));
+  const marker = block.listMarker ? renderListMarker(block.listMarker) : '';
   const body = renderInlineNodes(block.inlines || [], context);
   const empty = body || '<br>';
   const classNames = ['msdoc-paragraph'];
   if (block.paraState.lineSpacingRule === 'atLeast') classNames.push('msdoc-line-at-least');
+  if (block.listMarker) classNames.push('msdoc-list-item');
   if (block.styleName) classNames.push(`msdoc-style-${slugify(block.styleName)}`);
-  return `<${tag} class="${classNames.join(' ')}"${style ? ` style="${style}"` : ''}>${empty}</${tag}>`;
+  return `<${tag} class="${classNames.join(' ')}"${style ? ` style="${style}"` : ''}>${marker}${empty}</${tag}>`;
 }
 
 function cellStyle(cell: TableCellBlock): CssStyleObject {
@@ -610,6 +629,7 @@ export function defaultMsDocCss(): string {
 .msdoc-root{box-sizing:border-box;max-width:100%;padding:24px;background:#fff;color:#111;font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
 .msdoc-root *{box-sizing:border-box}
 .msdoc-paragraph{margin:0 0 8px;white-space:normal;word-break:break-word;overflow-wrap:anywhere}
+.msdoc-list-marker{display:inline-block;min-width:1.15em;margin-inline-end:.5em;white-space:nowrap}
 .msdoc-line-at-least span,.msdoc-line-at-least ins,.msdoc-line-at-least del{line-height:normal}
 .msdoc-paragraph:last-child{margin-bottom:0}
 .msdoc-table{margin:12px 0;border-collapse:collapse;border-spacing:0;max-width:100%}

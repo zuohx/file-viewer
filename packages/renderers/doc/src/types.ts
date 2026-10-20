@@ -349,6 +349,42 @@ export interface ParaState {
   [key: string]: unknown;
 }
 
+export interface MsDocListLevel {
+  /** Value of the first item in this level (LVLF.iStartAt). */
+  startAt: number;
+  /** MS-DOC numbering format; 23 is a bullet, 0 Arabic, 1/2 Roman, 3/4 letters. */
+  format: number;
+  /** Index of the character that follows the marker: 0 tab, 1 space, 2 nothing. */
+  follow: number;
+  /** Extra spacing after the marker, in twips. */
+  space: number;
+  /** Hanging indent contributed by the level, in twips. */
+  indent: number;
+  /** Numbering template; bullets hold the glyph, numbered levels hold \u0001..\u0009 placeholders. */
+  char: string;
+  /** Resolved face of the marker glyph (Wingdings, Symbol, ...). */
+  font?: string;
+}
+
+export interface MsDocListDefinition {
+  /** LSTF identifier (lsid). */
+  id: number;
+  levels: MsDocListLevel[];
+}
+
+/** List definitions keyed by ilfo, the value a paragraph's sprmPIlfo points at. */
+export type MsDocListTable = Record<string, MsDocListDefinition>;
+
+export interface ParagraphListMarker {
+  /** Rendered marker text: a bullet glyph or a formatted counter. */
+  text: string;
+  /** Zero-based list level. */
+  level: number;
+  kind: 'bullet' | 'number';
+  /** Face the authored glyph came from, kept for diagnostics. */
+  sourceFont?: string;
+}
+
 export interface Tcgrf {
   horzMerge?: number;
   vertMerge?: number;
@@ -627,6 +663,8 @@ export interface ParagraphBlock {
   paraState: ParaState;
   inlines: InlineNode[];
   text: string;
+  /** Resolved list marker for this paragraph, when it belongs to a list. */
+  listMarker?: ParagraphListMarker;
   paragraphMark?: Pick<CharState, 'revisionDeleted' | 'revisionInserted'>;
   storyKind?: string;
 }
@@ -685,6 +723,7 @@ export interface ParagraphModel {
   tableState: TableState;
   segments: CharSegment[];
   inlines: InlineNode[];
+  listMarker?: ParagraphListMarker;
 }
 
 export interface MsDocParseOptions {
@@ -735,6 +774,8 @@ export interface MsDocParseResult {
   meta: MsDocMeta;
   fonts: FontInfo[];
   styles: MsDocStyleSummary[];
+  /** List definitions keyed by ilfo; absent when the document declares none. */
+  lists?: MsDocListTable;
   blocks: MsDocBlock[];
   assets: MsDocAsset[];
 }
