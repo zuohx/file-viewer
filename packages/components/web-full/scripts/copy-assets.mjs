@@ -1,7 +1,532 @@
 #!/usr/bin/env node
-import{readFile as de}from"node:fs/promises";import{resolve as G}from"node:path";import{fileURLToPath as Me}from"node:url";import{createRequire as ke}from"node:module";import{dirname as be}from"node:path";import{createHash as he}from"node:crypto";import{existsSync as I}from"node:fs";import{copyFile as W,lstat as te,mkdir as _,mkdtemp as re,readFile as R,readdir as ge,rename as U,rm as V,stat as ie,writeFile as we}from"node:fs/promises";import{tmpdir as ne}from"node:os";import{dirname as N,isAbsolute as me,relative as K,resolve as a,sep as T}from"node:path";import{fileURLToPath as ye}from"node:url";var ae=a(N(ye(import.meta.url)),".."),ve=a(ae,"viewer"),C="flyfish-viewer-assets.json",L="file-viewer-copy-assets.manifest.json",q="file-viewer-copy-assets.receipt.json",Ae=JSON.parse(await R(a(ae,"package.json"),"utf8")),O=e=>he("sha256").update(e).digest("hex"),Se=async e=>O(await R(e)),M=e=>{let s=e.split(T).join("/").replace(/^\.\//,"");if(!s||s.startsWith("/")||s.includes("../"))throw new Error(`Unsafe asset path: ${e}`);return s},P=(e,s)=>{let i=a(e,M(s)),o=K(e,i);if(!o||o.startsWith(".."))throw new Error(`Asset path escapes target: ${s}`);return i},oe=async(e,s=e)=>{let i=[];for(let o of await ge(s,{withFileTypes:!0})){let c=a(s,o.name);o.isDirectory()?i.push(...await oe(e,c)):o.isFile()&&i.push(M(K(e,c)))}return i.sort()},Ee=(e,s)=>e==="directory"||e==="wasm-directory"?s.isDirectory():s.isFile(),Pe=async(e,s)=>{let i=await Promise.all(s.rendererAssetManifests.flatMap(t=>t.assets).filter(t=>t.target==="public"&&t.defaultPath).map(async t=>{let n=t.defaultPath||"",r;try{r=Ee(t.kind,await ie(a(e,n)))}catch{r=!1}return{id:t.id,rendererId:t.rendererId,kind:t.kind,target:t.target,required:t.required,relativePath:n,exists:r,description:t.description}})),o=i.filter(t=>t.required&&!t.exists),c=i.filter(t=>!t.required&&!t.exists);return{valid:o.length===0,checkedAt:new Date().toISOString(),assets:i,missingRequired:o,missingOptional:c}},Ie=async e=>{try{let s=JSON.parse(await R(a(e,q),"utf8"));if(s.schemaVersion!==1||s.packageName!=="file-viewer-copy-assets"||!Array.isArray(s.files)||typeof s.packageVersion!="string"||!Array.isArray(s.copyGroups)||s.copyGroups.some(t=>typeof t!="string"||!t)||typeof s.installedAt!="string"||s.assetManifestSha256!==void 0&&!/^[a-f0-9]{64}$/.test(s.assetManifestSha256)||s.files.some(t=>typeof t?.path!="string"||M(t.path)!==t.path||!Number.isSafeInteger(t.size)||t.size<0||!/^[a-f0-9]{64}$/.test(t.sha256)||t.ownership!=="managed"&&t.ownership!=="shared"||!Array.isArray(t.copyGroups)||t.copyGroups.some(n=>typeof n!="string"||!n)))throw new Error(`Invalid ${q}`);let i=new Map;for(let t of s.files){let n=t.path.replace(/\/{2,}/g,"/"),r=i.get(n);if(r&&(r.sha256!==t.sha256||r.size!==t.size))throw new Error(`Conflicting receipt entries for ${n}`);i.set(n,r?{...r,ownership:r.ownership==="shared"||t.ownership==="shared"?"shared":"managed",copyGroups:[...new Set([...r.copyGroups,...t.copyGroups])].sort()}:{...t,path:n})}let o=[...i.values()].sort((t,n)=>t.path.localeCompare(n.path));return JSON.stringify(o)!==JSON.stringify(s.files)?{...s,files:o,pathsCanonicalized:!0}:s}catch(s){if(s.code==="ENOENT")return null;throw s}},x=async(e,s)=>{let i=`${e}.${process.pid}.${Date.now()}.tmp`;await we(i,s,"utf8"),await U(i,e)},Re=async e=>{try{return await R(e,"utf8")}catch(s){if(s.code==="ENOENT")return null;throw s}},ce=async e=>{let s=a(e),i=a(process.env.INIT_CWD||process.cwd()),o=K(i,s),t=!me(o)&&o!==".."&&!o.startsWith(`..${T}`)?o.split(T).filter(Boolean).reduce((n,r)=>(n.push(a(n.at(-1)||i,r)),n),[]):[N(s),s];for(let n of[...new Set(t)])try{if((await te(n)).isSymbolicLink())throw new Error(`Refusing symbolic-link asset path: ${n}`)}catch(r){if(r.code!=="ENOENT")throw r}},D=async(e,s="")=>{let i=a(e);await ce(i);let o=s?M(s).split("/"):[],c=i;for(let t of["",...o]){t&&(c=a(c,t));try{if((await te(c)).isSymbolicLink())throw new Error(`Refusing symbolic-link asset path: ${c}`)}catch(n){if(n.code!=="ENOENT")throw n}}},se=async(e,s,i,o,c,t,n={})=>{await _(e,{recursive:!0}),await D(e);let r=await Ie(e),f=new Map(r?.files.map(l=>[l.path,l])||[]),u=new Map;for(let l of c.rendererAssetManifests){let h=a(n[l.rendererId]||s);for(let d of l.assets){if(d.target!=="public"||!d.defaultPath)continue;let v=d.defaultPath,w=P(h,v);if(!I(w)){if(d.required)throw new Error(`Missing bundled viewer asset: ${w}`);continue}let j=(await ie(w)).isDirectory()?(await oe(w)).map(m=>M(`${v.replace(/\/+$/,"")}/${m}`)):[M(v)];for(let m of j){let S=P(h,m),k=await R(S),b=O(k),J=u.get(m);if(J&&J.sha256!==b)throw new Error(`Conflicting bundled viewer asset: ${m}`);let E=u.get(m)||{path:m,sourcePath:S,size:k.byteLength,sha256:b,copyGroups:new Set};E.copyGroups.add(l.rendererId),u.set(m,E)}}}for(let l of["flyfish-viewer-manifest.json"]){let h=a(s,l);if(!I(h))continue;let d=await R(h);u.set(l,{path:l,sourcePath:h,size:d.byteLength,sha256:O(d),copyGroups:new Set(t)})}let y=new Map,A=new Set;for(let l of u.values()){let h=P(e,l.path);if(!I(h)){y.set(l.path,"managed");continue}let d=await Se(h),v=f.get(l.path);if(v?.ownership==="managed"){if(d!==v.sha256&&d!==l.sha256)throw new Error(`Managed asset was modified outside File Viewer: ${l.path}`);y.set(l.path,"managed"),d===l.sha256&&A.add(l.path)}else if(d===l.sha256)y.set(l.path,"shared"),A.add(l.path);else throw new Error(`Refusing to overwrite an unowned asset: ${l.path}`)}let $=await re(a(ne(),"file-viewer-copy-assets-")),Y=a($,"backup"),Q=[],fe=[q,L,C].map(l=>a(e,l)),F=new Map;try{for(let p of fe)F.set(p,await Re(p));for(let p of u.values()){if(await D(e,p.path),A.has(p.path))continue;let g=P(e,p.path);if(I(g)){let ee=P(Y,p.path);await _(N(ee),{recursive:!0}),await W(g,ee)}await _(N(g),{recursive:!0}),await W(p.sourcePath,g),Q.push(p.path)}let l=new Map(r?.files.map(p=>[p.path,p])||[]);for(let p of u.values()){let g=f.get(p.path)?.copyGroups||[];l.set(p.path,{path:p.path,size:p.size,sha256:p.sha256,ownership:y.get(p.path)||"managed",copyGroups:[...new Set([...g,...p.copyGroups])].sort()})}let h=[...l.values()].sort((p,g)=>p.path.localeCompare(g.path)),d=[...new Set([...r?.copyGroups||[],...t])].sort(),v=o.rendererAssetManifests.filter(p=>d.includes(p.rendererId)),w=await Pe(e,{schemaVersion:1,rendererAssetManifests:v});if(!w.valid)throw new Error(`Viewer static assets are missing required resources: ${w.missingRequired.map(p=>`${p.rendererId}:${p.relativePath}`).join(", ")}`);let B={valid:w.valid,assets:w.assets,missingRequired:w.missingRequired,missingOptional:w.missingOptional},j=!r?.pathsCanonicalized&&r?.packageVersion===i&&JSON.stringify(r.copyGroups)===JSON.stringify(d)&&JSON.stringify(r.files)===JSON.stringify(h),m=w.checkedAt,S=F.get(a(e,C)),k=F.get(a(e,L)),b=!!(r?.assetManifestSha256&&S&&k===S&&O(Buffer.from(S))===r.assetManifestSha256);if(j&&b&&S)try{let g=JSON.parse(S).validation;g&&typeof g.checkedAt=="string"&&JSON.stringify({valid:g.valid,assets:g.assets,missingRequired:g.missingRequired,missingOptional:g.missingOptional})===JSON.stringify(B)&&(m=g.checkedAt)}catch{}let J={schemaVersion:1,generatedAt:m,packageName:"file-viewer-copy-assets",packageVersion:i,rendererAssetManifests:v,validation:{...B,checkedAt:m}},E=`${JSON.stringify(J,null,2)}
-`,X=O(Buffer.from(E)),Z=j&&b&&S===E&&k===E&&r?.assetManifestSha256===X,ue={schemaVersion:1,packageName:"file-viewer-copy-assets",packageVersion:i,copyGroups:d,installedAt:Z?r.installedAt:m,files:h,assetManifestSha256:X};return Z||(await x(a(e,q),`${JSON.stringify(ue,null,2)}
-`),await x(a(e,L),E),await x(a(e,C),E)),{sourceDir:s,targetDir:e,assetBaseUrl:"/file-viewer/",assetManifestPath:a(e,C),validation:w}}catch(l){for(let h of Q.reverse()){let d=P(e,h),v=P(Y,h);I(v)?(await _(N(d),{recursive:!0}),await W(v,d)):await V(d,{force:!0})}for(let[h,d]of F)d===null?await V(h,{force:!0}):await x(h,d);throw l}finally{await V($,{recursive:!0,force:!0})}},le=e=>{let s="copy",i,o=!1,c=!1,t=[],n=!1;for(let r=0;r<e.length;r+=1){let f=e[r];if(f==="--help"||f==="-h"){s="help";continue}if(f==="--version"||f==="-v"){s="version";continue}if(f==="--no-clean"){o=!1;continue}if(f==="--clean"){o=!0;continue}if(f==="--confirm"){c=!0;continue}if(f==="--json"){n=!0;continue}if(f==="--renderers"){let u=e[++r];if(!u)throw new Error("--renderers requires a comma-separated value");t=[...new Set(u.split(",").map(y=>y.trim()).filter(Boolean))].sort();continue}if(f.startsWith("-"))throw new Error(`Unknown option: ${f}`);if(i)throw new Error(`Only one target directory is supported, received: ${f}`);i=f}return{mode:s,targetDir:i,clean:o,confirmClean:c,rendererIds:t,json:n}},pe=async(e={})=>{let s=a(e.sourceDir||ve),i=e.packageVersion||Ae.version,o=e.targetDir||process.env.FILE_VIEWER_PUBLIC_DIR,c=a(o||a(process.env.INIT_CWD||process.cwd(),"public/file-viewer"));if(await ce(c),!I(s))throw new Error(`Missing bundled viewer assets: ${s}`);let t=JSON.parse(await R(a(s,C),"utf8"));if(t.schemaVersion!==1)throw new Error(`Unsupported viewer asset manifest schema: ${t.schemaVersion}`);let n=new Set(e.rendererIds||[]),r=n.size?n:new Set(t.rendererAssetManifests.map(u=>u.rendererId)),f=n.size?{...t,rendererAssetManifests:t.rendererAssetManifests.filter(u=>r.has(u.rendererId))}:t;if(n.size){let u=new Set(t.rendererAssetManifests.map(A=>A.rendererId)),y=[...r].filter(A=>!u.has(A));if(y.length)throw new Error(`Unknown renderer asset ids: ${y.join(", ")}`)}if(e.clean&&!e.confirmClean)throw new Error("Full asset cleanup requires both --clean and --confirm");if(e.clean){if(c===a("/")||c===a(process.cwd())||c===a(process.env.HOME||"/nonexistent")||c.split(T).pop()!=="file-viewer")throw new Error(`Refusing to clean unsafe target: ${c}`);await D(c);let u=await re(a(ne(),"file-viewer-copy-assets-clean-")),y=a(u,"backup"),A=!1;try{return I(c)&&(await U(c,y),A=!0),await se(c,s,i,t,f,r,e.rendererSources)}catch($){throw await V(c,{recursive:!0,force:!0}),A&&await U(y,c),$}finally{await V(u,{recursive:!0,force:!0})}}return se(c,s,i,t,f,r,e.rendererSources)};var H=Me(new URL("..",import.meta.url)),z=JSON.parse(await de(G(H,"package.json"),"utf8")),Ce=ke(G(H,"package.json")),Oe=async()=>Object.fromEntries(await Promise.all(["cad","drawing"].map(async e=>{let s=`@file-viewer/assets-${e}`,i=Ce.resolve(`${s}/package.json`),o=JSON.parse(await de(i,"utf8"));if(o.name!==s||o.version!==z.version)throw new Error(`Asset pack version mismatch: ${s}`);return[e,G(be(i),"viewer")]}))),Ve=`file-viewer-copy-assets ${z.version}
+
+// scripts/copy-assets-entry.mjs
+import { readFile as readFile2 } from "node:fs/promises";
+import { resolve as resolve2 } from "node:path";
+import { fileURLToPath as fileURLToPath2 } from "node:url";
+import { createRequire } from "node:module";
+import { dirname as dirname2 } from "node:path";
+
+// ../../tools/copy-assets/src/index.ts
+import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
+import {
+  copyFile,
+  lstat,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  stat,
+  writeFile
+} from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
+var packageDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+var bundledViewerDir = resolve(packageDir, "viewer");
+var manifestFilename = "flyfish-viewer-assets.json";
+var selectedManifestFilename = "file-viewer-copy-assets.manifest.json";
+var receiptFilename = "file-viewer-copy-assets.receipt.json";
+var packageJson = JSON.parse(await readFile(resolve(packageDir, "package.json"), "utf8"));
+var sha256 = (content) => createHash("sha256").update(content).digest("hex");
+var sha256File = async (path) => sha256(await readFile(path));
+var normalizeRelativePath = (value) => {
+  const normalized = value.split(sep).join("/").replace(/^\.\//, "");
+  if (!normalized || normalized.startsWith("/") || normalized.includes("../")) {
+    throw new Error(`Unsafe asset path: ${value}`);
+  }
+  return normalized;
+};
+var containedPath = (root, path) => {
+  const target = resolve(root, normalizeRelativePath(path));
+  const relation = relative(root, target);
+  if (!relation || relation.startsWith("..")) throw new Error(`Asset path escapes target: ${path}`);
+  return target;
+};
+var listFilePaths = async (root, current = root) => {
+  const result = [];
+  for (const entry of await readdir(current, { withFileTypes: true })) {
+    const path = resolve(current, entry.name);
+    if (entry.isDirectory()) result.push(...await listFilePaths(root, path));
+    else if (entry.isFile()) result.push(normalizeRelativePath(relative(root, path)));
+  }
+  return result.sort();
+};
+var isExpectedAssetKind = (kind, pathStat) => {
+  return kind === "directory" || kind === "wasm-directory" ? pathStat.isDirectory() : pathStat.isFile();
+};
+var validateCopiedAssets = async (targetDir, manifest) => {
+  const assets = await Promise.all(
+    manifest.rendererAssetManifests.flatMap((renderer) => renderer.assets).filter((asset) => asset.target === "public" && asset.defaultPath).map(async (asset) => {
+      const relativePath = asset.defaultPath || "";
+      let exists;
+      try {
+        exists = isExpectedAssetKind(asset.kind, await stat(resolve(targetDir, relativePath)));
+      } catch {
+        exists = false;
+      }
+      return {
+        id: asset.id,
+        rendererId: asset.rendererId,
+        kind: asset.kind,
+        target: asset.target,
+        required: asset.required,
+        relativePath,
+        exists,
+        description: asset.description
+      };
+    })
+  );
+  const missingRequired = assets.filter((asset) => asset.required && !asset.exists);
+  const missingOptional = assets.filter((asset) => !asset.required && !asset.exists);
+  return {
+    valid: missingRequired.length === 0,
+    checkedAt: (/* @__PURE__ */ new Date()).toISOString(),
+    assets,
+    missingRequired,
+    missingOptional
+  };
+};
+var readAggregateReceipt = async (targetDir) => {
+  try {
+    const receipt = JSON.parse(
+      await readFile(resolve(targetDir, receiptFilename), "utf8")
+    );
+    if (receipt.schemaVersion !== 1 || receipt.packageName !== "file-viewer-copy-assets" || !Array.isArray(receipt.files) || typeof receipt.packageVersion !== "string" || !Array.isArray(receipt.copyGroups) || receipt.copyGroups.some((group) => typeof group !== "string" || !group) || typeof receipt.installedAt !== "string" || receipt.assetManifestSha256 !== void 0 && !/^[a-f0-9]{64}$/.test(receipt.assetManifestSha256) || receipt.files.some(
+      (file) => typeof file?.path !== "string" || normalizeRelativePath(file.path) !== file.path || !Number.isSafeInteger(file.size) || file.size < 0 || !/^[a-f0-9]{64}$/.test(file.sha256) || file.ownership !== "managed" && file.ownership !== "shared" || !Array.isArray(file.copyGroups) || file.copyGroups.some((group) => typeof group !== "string" || !group)
+    )) {
+      throw new Error(`Invalid ${receiptFilename}`);
+    }
+    const files = /* @__PURE__ */ new Map();
+    for (const file of receipt.files) {
+      const path = file.path.replace(/\/{2,}/g, "/");
+      const previous = files.get(path);
+      if (previous && (previous.sha256 !== file.sha256 || previous.size !== file.size))
+        throw new Error(`Conflicting receipt entries for ${path}`);
+      files.set(path, previous ? {
+        ...previous,
+        ownership: previous.ownership === "shared" || file.ownership === "shared" ? "shared" : "managed",
+        copyGroups: [.../* @__PURE__ */ new Set([...previous.copyGroups, ...file.copyGroups])].sort()
+      } : { ...file, path });
+    }
+    const canonicalFiles = [...files.values()].sort((left, right) => left.path.localeCompare(right.path));
+    const pathsCanonicalized = JSON.stringify(canonicalFiles) !== JSON.stringify(receipt.files);
+    return pathsCanonicalized ? { ...receipt, files: canonicalFiles, pathsCanonicalized: true } : receipt;
+  } catch (error) {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  }
+};
+var atomicWrite = async (path, content) => {
+  const temporary = `${path}.${process.pid}.${Date.now()}.tmp`;
+  await writeFile(temporary, content, "utf8");
+  await rename(temporary, path);
+};
+var readTextIfPresent = async (path) => {
+  try {
+    return await readFile(path, "utf8");
+  } catch (error) {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  }
+};
+var assertTrustedTargetAncestors = async (target) => {
+  const targetPath = resolve(target);
+  const projectRoot = resolve(process.env.INIT_CWD || process.cwd());
+  const projectRelation = relative(projectRoot, targetPath);
+  const withinProject = !isAbsolute(projectRelation) && projectRelation !== ".." && !projectRelation.startsWith(`..${sep}`);
+  const paths = withinProject ? projectRelation.split(sep).filter(Boolean).reduce((items, part) => {
+    items.push(resolve(items.at(-1) || projectRoot, part));
+    return items;
+  }, []) : [dirname(targetPath), targetPath];
+  for (const path of [...new Set(paths)]) {
+    try {
+      if ((await lstat(path)).isSymbolicLink())
+        throw new Error(`Refusing symbolic-link asset path: ${path}`);
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+  }
+};
+var assertNoSymlinkPath = async (root, relativePath = "") => {
+  const rootPath = resolve(root);
+  await assertTrustedTargetAncestors(rootPath);
+  const parts = relativePath ? normalizeRelativePath(relativePath).split("/") : [];
+  let cursor = rootPath;
+  for (const part of ["", ...parts]) {
+    if (part) cursor = resolve(cursor, part);
+    try {
+      if ((await lstat(cursor)).isSymbolicLink())
+        throw new Error(`Refusing symbolic-link asset path: ${cursor}`);
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+  }
+};
+var copySelectedAssetsTransactionally = async (targetDir, sourceDir, packageVersion, manifest, selectedManifest, selectedRendererIds, rendererSources = {}) => {
+  await mkdir(targetDir, { recursive: true });
+  await assertNoSymlinkPath(targetDir);
+  const previous = await readAggregateReceipt(targetDir);
+  const previousByPath = new Map(previous?.files.map((file) => [file.path, file]) || []);
+  const selectedFiles = /* @__PURE__ */ new Map();
+  for (const renderer of selectedManifest.rendererAssetManifests) {
+    const rendererSource = resolve(rendererSources[renderer.rendererId] || sourceDir);
+    for (const asset of renderer.assets) {
+      if (asset.target !== "public" || !asset.defaultPath) continue;
+      const defaultPath = asset.defaultPath;
+      const sourcePath = containedPath(rendererSource, defaultPath);
+      if (!existsSync(sourcePath)) {
+        if (asset.required) throw new Error(`Missing bundled viewer asset: ${sourcePath}`);
+        continue;
+      }
+      const info = await stat(sourcePath);
+      const paths = info.isDirectory() ? (await listFilePaths(sourcePath)).map(
+        (path) => normalizeRelativePath(`${defaultPath.replace(/\/+$/, "")}/${path}`)
+      ) : [normalizeRelativePath(defaultPath)];
+      for (const path of paths) {
+        const contentPath = containedPath(rendererSource, path);
+        const content = await readFile(contentPath);
+        const hash = sha256(content);
+        const previousFile = selectedFiles.get(path);
+        if (previousFile && previousFile.sha256 !== hash)
+          throw new Error(`Conflicting bundled viewer asset: ${path}`);
+        const current = selectedFiles.get(path) || {
+          path,
+          sourcePath: contentPath,
+          size: content.byteLength,
+          sha256: hash,
+          copyGroups: /* @__PURE__ */ new Set()
+        };
+        current.copyGroups.add(renderer.rendererId);
+        selectedFiles.set(path, current);
+      }
+    }
+  }
+  for (const metadataName of ["flyfish-viewer-manifest.json"]) {
+    const source = resolve(sourceDir, metadataName);
+    if (!existsSync(source)) continue;
+    const content = await readFile(source);
+    selectedFiles.set(metadataName, {
+      path: metadataName,
+      sourcePath: source,
+      size: content.byteLength,
+      sha256: sha256(content),
+      copyGroups: new Set(selectedRendererIds)
+    });
+  }
+  const ownership = /* @__PURE__ */ new Map();
+  const unchanged = /* @__PURE__ */ new Set();
+  for (const file of selectedFiles.values()) {
+    const destination = containedPath(targetDir, file.path);
+    if (!existsSync(destination)) {
+      ownership.set(file.path, "managed");
+      continue;
+    }
+    const destinationHash = await sha256File(destination);
+    const previousFile = previousByPath.get(file.path);
+    if (previousFile?.ownership === "managed") {
+      if (destinationHash !== previousFile.sha256 && destinationHash !== file.sha256) {
+        throw new Error(`Managed asset was modified outside File Viewer: ${file.path}`);
+      }
+      ownership.set(file.path, "managed");
+      if (destinationHash === file.sha256) unchanged.add(file.path);
+    } else if (destinationHash === file.sha256) {
+      ownership.set(file.path, "shared");
+      unchanged.add(file.path);
+    } else {
+      throw new Error(`Refusing to overwrite an unowned asset: ${file.path}`);
+    }
+  }
+  const operationRoot = await mkdtemp(resolve(tmpdir(), "file-viewer-copy-assets-"));
+  const backupRoot = resolve(operationRoot, "backup");
+  const touched = [];
+  const metadataPaths = [receiptFilename, selectedManifestFilename, manifestFilename].map(
+    (name) => resolve(targetDir, name)
+  );
+  const metadataBefore = /* @__PURE__ */ new Map();
+  try {
+    for (const path of metadataPaths) metadataBefore.set(path, await readTextIfPresent(path));
+    for (const file of selectedFiles.values()) {
+      await assertNoSymlinkPath(targetDir, file.path);
+      if (unchanged.has(file.path)) continue;
+      const destination = containedPath(targetDir, file.path);
+      if (existsSync(destination)) {
+        const backup = containedPath(backupRoot, file.path);
+        await mkdir(dirname(backup), { recursive: true });
+        await copyFile(destination, backup);
+      }
+      await mkdir(dirname(destination), { recursive: true });
+      await copyFile(file.sourcePath, destination);
+      touched.push(file.path);
+    }
+    const nextByPath = new Map(previous?.files.map((file) => [file.path, file]) || []);
+    for (const file of selectedFiles.values()) {
+      const oldGroups = previousByPath.get(file.path)?.copyGroups || [];
+      nextByPath.set(file.path, {
+        path: file.path,
+        size: file.size,
+        sha256: file.sha256,
+        ownership: ownership.get(file.path) || "managed",
+        copyGroups: [.../* @__PURE__ */ new Set([...oldGroups, ...file.copyGroups])].sort()
+      });
+    }
+    const files = [...nextByPath.values()].sort(
+      (left, right) => left.path.localeCompare(right.path)
+    );
+    const copyGroups = [
+      .../* @__PURE__ */ new Set([...previous?.copyGroups || [], ...selectedRendererIds])
+    ].sort();
+    const installedRendererAssetManifests = manifest.rendererAssetManifests.filter(
+      (renderer) => copyGroups.includes(renderer.rendererId)
+    );
+    const installedValidation = await validateCopiedAssets(targetDir, {
+      schemaVersion: 1,
+      rendererAssetManifests: installedRendererAssetManifests
+    });
+    if (!installedValidation.valid) {
+      throw new Error(
+        `Viewer static assets are missing required resources: ${installedValidation.missingRequired.map((asset) => `${asset.rendererId}:${asset.relativePath}`).join(", ")}`
+      );
+    }
+    const validationWithoutTimestamp = {
+      valid: installedValidation.valid,
+      assets: installedValidation.assets,
+      missingRequired: installedValidation.missingRequired,
+      missingOptional: installedValidation.missingOptional
+    };
+    const samePayload = !previous?.pathsCanonicalized && previous?.packageVersion === packageVersion && JSON.stringify(previous.copyGroups) === JSON.stringify(copyGroups) && JSON.stringify(previous.files) === JSON.stringify(files);
+    let checkedAt = installedValidation.checkedAt;
+    const previousManifestText = metadataBefore.get(resolve(targetDir, manifestFilename));
+    const previousSelectedManifestText = metadataBefore.get(
+      resolve(targetDir, selectedManifestFilename)
+    );
+    const previousMetadataTrusted = Boolean(
+      previous?.assetManifestSha256 && previousManifestText && previousSelectedManifestText === previousManifestText && sha256(Buffer.from(previousManifestText)) === previous.assetManifestSha256
+    );
+    if (samePayload && previousMetadataTrusted && previousManifestText) {
+      try {
+        const previousManifest = JSON.parse(previousManifestText);
+        const previousValidation = previousManifest.validation;
+        if (previousValidation && typeof previousValidation.checkedAt === "string" && JSON.stringify({
+          valid: previousValidation.valid,
+          assets: previousValidation.assets,
+          missingRequired: previousValidation.missingRequired,
+          missingOptional: previousValidation.missingOptional
+        }) === JSON.stringify(validationWithoutTimestamp)) {
+          checkedAt = previousValidation.checkedAt;
+        }
+      } catch {
+      }
+    }
+    const installedManifestObject = {
+      schemaVersion: 1,
+      generatedAt: checkedAt,
+      packageName: "file-viewer-copy-assets",
+      packageVersion,
+      rendererAssetManifests: installedRendererAssetManifests,
+      validation: {
+        ...validationWithoutTimestamp,
+        checkedAt
+      }
+    };
+    const installedManifest = `${JSON.stringify(installedManifestObject, null, 2)}
+`;
+    const installedManifestSha256 = sha256(Buffer.from(installedManifest));
+    const same = samePayload && previousMetadataTrusted && previousManifestText === installedManifest && previousSelectedManifestText === installedManifest && previous?.assetManifestSha256 === installedManifestSha256;
+    const receipt = {
+      schemaVersion: 1,
+      packageName: "file-viewer-copy-assets",
+      packageVersion,
+      copyGroups,
+      installedAt: same ? previous.installedAt : checkedAt,
+      files,
+      assetManifestSha256: installedManifestSha256
+    };
+    if (!same) {
+      await atomicWrite(
+        resolve(targetDir, receiptFilename),
+        `${JSON.stringify(receipt, null, 2)}
+`
+      );
+      await atomicWrite(resolve(targetDir, selectedManifestFilename), installedManifest);
+      await atomicWrite(resolve(targetDir, manifestFilename), installedManifest);
+    }
+    return {
+      sourceDir,
+      targetDir,
+      assetBaseUrl: "/file-viewer/",
+      assetManifestPath: resolve(targetDir, manifestFilename),
+      validation: installedValidation
+    };
+  } catch (error) {
+    for (const path of touched.reverse()) {
+      const destination = containedPath(targetDir, path);
+      const backup = containedPath(backupRoot, path);
+      if (existsSync(backup)) {
+        await mkdir(dirname(destination), { recursive: true });
+        await copyFile(backup, destination);
+      } else {
+        await rm(destination, { force: true });
+      }
+    }
+    for (const [path, content] of metadataBefore) {
+      if (content === null) await rm(path, { force: true });
+      else await atomicWrite(path, content);
+    }
+    throw error;
+  } finally {
+    await rm(operationRoot, { recursive: true, force: true });
+  }
+};
+var parseCopyAssetsCliArguments = (args) => {
+  let mode = "copy";
+  let targetDir;
+  let clean = false;
+  let confirmClean = false;
+  let rendererIds = [];
+  let json = false;
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index];
+    if (argument === "--help" || argument === "-h") {
+      mode = "help";
+      continue;
+    }
+    if (argument === "--version" || argument === "-v") {
+      mode = "version";
+      continue;
+    }
+    if (argument === "--no-clean") {
+      clean = false;
+      continue;
+    }
+    if (argument === "--clean") {
+      clean = true;
+      continue;
+    }
+    if (argument === "--confirm") {
+      confirmClean = true;
+      continue;
+    }
+    if (argument === "--json") {
+      json = true;
+      continue;
+    }
+    if (argument === "--renderers") {
+      const value = args[++index];
+      if (!value) throw new Error("--renderers requires a comma-separated value");
+      rendererIds = [
+        ...new Set(
+          value.split(",").map((item) => item.trim()).filter(Boolean)
+        )
+      ].sort();
+      continue;
+    }
+    if (argument.startsWith("-")) {
+      throw new Error(`Unknown option: ${argument}`);
+    }
+    if (targetDir) {
+      throw new Error(`Only one target directory is supported, received: ${argument}`);
+    }
+    targetDir = argument;
+  }
+  return { mode, targetDir, clean, confirmClean, rendererIds, json };
+};
+var copyFileViewerAssets = async (options = {}) => {
+  const sourceDir = resolve(options.sourceDir || bundledViewerDir);
+  const packageVersion = options.packageVersion || packageJson.version;
+  const configuredTarget = options.targetDir || process.env.FILE_VIEWER_PUBLIC_DIR;
+  const targetDir = resolve(
+    configuredTarget || resolve(process.env.INIT_CWD || process.cwd(), "public/file-viewer")
+  );
+  await assertTrustedTargetAncestors(targetDir);
+  if (!existsSync(sourceDir)) {
+    throw new Error(`Missing bundled viewer assets: ${sourceDir}`);
+  }
+  const manifest = JSON.parse(
+    await readFile(resolve(sourceDir, manifestFilename), "utf8")
+  );
+  if (manifest.schemaVersion !== 1) {
+    throw new Error(`Unsupported viewer asset manifest schema: ${manifest.schemaVersion}`);
+  }
+  const requestedRendererIds = new Set(options.rendererIds || []);
+  const selectedRendererIds = requestedRendererIds.size ? requestedRendererIds : new Set(manifest.rendererAssetManifests.map((renderer) => renderer.rendererId));
+  const selectedManifest = requestedRendererIds.size ? {
+    ...manifest,
+    rendererAssetManifests: manifest.rendererAssetManifests.filter(
+      (renderer) => selectedRendererIds.has(renderer.rendererId)
+    )
+  } : manifest;
+  if (requestedRendererIds.size) {
+    const availableRendererIds = new Set(
+      manifest.rendererAssetManifests.map((renderer) => renderer.rendererId)
+    );
+    const unknown = [...selectedRendererIds].filter(
+      (rendererId) => !availableRendererIds.has(rendererId)
+    );
+    if (unknown.length) throw new Error(`Unknown renderer asset ids: ${unknown.join(", ")}`);
+  }
+  if (options.clean && !options.confirmClean) {
+    throw new Error("Full asset cleanup requires both --clean and --confirm");
+  }
+  if (options.clean) {
+    if (targetDir === resolve("/") || targetDir === resolve(process.cwd()) || targetDir === resolve(process.env.HOME || "/nonexistent") || targetDir.split(sep).pop() !== "file-viewer") {
+      throw new Error(`Refusing to clean unsafe target: ${targetDir}`);
+    }
+    await assertNoSymlinkPath(targetDir);
+    const operationRoot = await mkdtemp(resolve(tmpdir(), "file-viewer-copy-assets-clean-"));
+    const backup = resolve(operationRoot, "backup");
+    let moved = false;
+    try {
+      if (existsSync(targetDir)) {
+        await rename(targetDir, backup);
+        moved = true;
+      }
+      return await copySelectedAssetsTransactionally(
+        targetDir,
+        sourceDir,
+        packageVersion,
+        manifest,
+        selectedManifest,
+        selectedRendererIds,
+        options.rendererSources
+      );
+    } catch (error) {
+      await rm(targetDir, { recursive: true, force: true });
+      if (moved) await rename(backup, targetDir);
+      throw error;
+    } finally {
+      await rm(operationRoot, { recursive: true, force: true });
+    }
+  }
+  return copySelectedAssetsTransactionally(
+    targetDir,
+    sourceDir,
+    packageVersion,
+    manifest,
+    selectedManifest,
+    selectedRendererIds,
+    options.rendererSources
+  );
+};
+
+// scripts/copy-assets-entry.mjs
+var packageDir2 = fileURLToPath2(new URL("..", import.meta.url));
+var packageJson2 = JSON.parse(await readFile2(resolve2(packageDir2, "package.json"), "utf8"));
+var require2 = createRequire(resolve2(packageDir2, "package.json"));
+var resolveRendererSources = async () => Object.fromEntries(await Promise.all(
+  ["cad", "drawing"].map(async (id) => {
+    const name = `@file-viewer/assets-${id}`;
+    const manifestPath = require2.resolve(`${name}/package.json`);
+    const manifest = JSON.parse(await readFile2(manifestPath, "utf8"));
+    if (manifest.name !== name || manifest.version !== packageJson2.version)
+      throw new Error(`Asset pack version mismatch: ${name}`);
+    return [id, resolve2(dirname2(manifestPath), "viewer")];
+  })
+));
+var help = `file-viewer-copy-assets ${packageJson2.version}
 
 Copy File Viewer Worker, WASM, font, and vendor assets into a self-hosted web project.
 
@@ -21,11 +546,37 @@ Environment:
   FILE_VIEWER_PUBLIC_DIR      Override the default target directory
   FILE_VIEWER_SKIP_ASSET_COPY Skip copying when set to 1 or true
   INIT_CWD                    Host project root used for the default target
-`;try{let e=le(process.argv.slice(2));if(e.mode==="help")process.stdout.write(`${Ve}
-`);else if(e.mode==="version")process.stdout.write(`${z.version}
-`);else if(process.env.FILE_VIEWER_SKIP_ASSET_COPY!=="1"&&process.env.FILE_VIEWER_SKIP_ASSET_COPY!=="true"){let s=await pe({...e,sourceDir:G(H,"dist"),rendererSources:await Oe(),packageVersion:z.version});e.json?process.stdout.write(`${JSON.stringify({...s,mode:"copy"})}
-`):(process.stdout.write(`[file-viewer-copy-assets] copied assets to ${s.targetDir}
-`),process.stdout.write(`[file-viewer-copy-assets] wrote manifest ${s.assetManifestPath}
-`))}else e.json&&process.stdout.write(`${JSON.stringify({mode:"skipped",reason:"FILE_VIEWER_SKIP_ASSET_COPY"})}
-`)}catch(e){process.stderr.write(`[file-viewer-copy-assets] ${e instanceof Error?e.message:String(e)}
-`),process.exitCode=1}
+`;
+try {
+  const parsed = parseCopyAssetsCliArguments(process.argv.slice(2));
+  if (parsed.mode === "help") {
+    process.stdout.write(`${help}
+`);
+  } else if (parsed.mode === "version") {
+    process.stdout.write(`${packageJson2.version}
+`);
+  } else if (process.env.FILE_VIEWER_SKIP_ASSET_COPY !== "1" && process.env.FILE_VIEWER_SKIP_ASSET_COPY !== "true") {
+    const result = await copyFileViewerAssets({
+      ...parsed,
+      sourceDir: resolve2(packageDir2, "dist"),
+      rendererSources: await resolveRendererSources(),
+      packageVersion: packageJson2.version
+    });
+    if (parsed.json) {
+      process.stdout.write(`${JSON.stringify({ ...result, mode: "copy" })}
+`);
+    } else {
+      process.stdout.write(`[file-viewer-copy-assets] copied assets to ${result.targetDir}
+`);
+      process.stdout.write(`[file-viewer-copy-assets] wrote manifest ${result.assetManifestPath}
+`);
+    }
+  } else if (parsed.json) {
+    process.stdout.write(`${JSON.stringify({ mode: "skipped", reason: "FILE_VIEWER_SKIP_ASSET_COPY" })}
+`);
+  }
+} catch (error) {
+  process.stderr.write(`[file-viewer-copy-assets] ${error instanceof Error ? error.message : String(error)}
+`);
+  process.exitCode = 1;
+}
