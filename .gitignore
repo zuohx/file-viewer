@@ -3,6 +3,10 @@
 /.release
 /.agents
 /.codex
+# Local agent workspace state; project skills under .workbuddy/skills stay trackable.
+/.workbuddy/memory/
+/.workbuddy/output/
+/.workbuddy/tmp/
 /ecosystem/private-archive
 /BRANCHES.md
 /WRAPPER_ECOSYSTEM.md
