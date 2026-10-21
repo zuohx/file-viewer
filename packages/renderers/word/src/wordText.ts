@@ -12,7 +12,7 @@ let scopeNumber = 0
  * Only flat author rules are retained; resources/active CSS pass the same policy
  * as inline markup. Other at-rules (including remote fonts) are not executed.
  */
-export function renderWordText(
+export async function renderWordText(
   buffer: ArrayBuffer, target: HTMLDivElement, kind: 'html' | 'text', context?: FileRenderContext
 ) {
   const text = decodeFileViewerTextBuffer(buffer).text

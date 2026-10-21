@@ -436,6 +436,10 @@ function renderInlineNodes(nodes: InlineNode[], context: RenderContext): string 
     if (node.type === 'attachment') return renderAttachmentNode(node, context);
     if (node.type === 'lineBreak') return '<br>';
     if (node.type === 'pageBreak') return '<span class="msdoc-page-break"></span>';
+    if (node.type === 'pageNumber') {
+      const style = node.style ? styleObjectToCss(inlineStyleToCss(node.style, context)) : '';
+      return `<span class="msdoc-page-number"${style ? ` style="${style}"` : ''}>${escapeHtml(node.value)}</span>`;
+    }
     return '';
   }).join('');
 }

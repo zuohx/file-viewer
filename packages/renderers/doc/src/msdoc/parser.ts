@@ -289,11 +289,11 @@ function buildInlineNodes(segments: CharSegment[], resolveAsset: (charState: Cha
           });
         }
         // PAGE results are computed at layout time. The cached value in the
-        // stream belongs to whichever page Word last laid out, so a preview
-        // that renders page one should show "1" instead.
+        // stream belongs to whichever page Word last laid out, so emit a
+        // placeholder the page shell can rewrite once pagination is known.
         const instruction = current.instruction.trim().toUpperCase();
         if (instruction === 'PAGE' || instruction.startsWith('PAGE ')) {
-          nodes = [{ type: 'text', text: '1', style: segment.state }];
+          nodes = [{ type: 'pageNumber', value: '1', style: segment.state }];
         }
         for (const node of nodes) emitInline(fieldStack, output, node);
         continue;

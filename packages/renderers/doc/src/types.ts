@@ -662,7 +662,14 @@ export interface PageBreakInlineNode {
   style?: CharState;
 }
 
-export type InlineNode = TextInlineNode | ImageInlineNode | AttachmentInlineNode | LineBreakInlineNode | PageBreakInlineNode;
+export interface PageNumberInlineNode {
+  type: 'pageNumber';
+  style?: CharState;
+  /** Placeholder value before pagination; the page shell rewrites it per page. */
+  value: string;
+}
+
+export type InlineNode = TextInlineNode | ImageInlineNode | AttachmentInlineNode | LineBreakInlineNode | PageBreakInlineNode | PageNumberInlineNode;
 
 export interface ParagraphBlock {
   type: 'paragraph';
