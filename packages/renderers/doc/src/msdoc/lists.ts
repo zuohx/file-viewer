@@ -63,6 +63,22 @@ function readLevelFontIndex(grpprl: Uint8Array): number | undefined {
   return undefined;
 }
 
+/** Reads one of the given sprm codes out of a paragraph-property group. */
+function readSprmValue(grpprl: Uint8Array, codes: readonly number[]): number | undefined {
+  let offset = 0;
+  while (offset + 2 <= grpprl.length) {
+    const sprm = u16(grpprl, offset);
+    offset += 2;
+    const spra = (sprm >> 13) & 0x07;
+    let size = SPRM_OPERAND_SIZES[spra] ?? 0;
+    if (size < 0) size = u8(grpprl, offset) + 1;
+    if (size > grpprl.length - offset) return undefined;
+    if (codes.includes(sprm)) return i16(grpprl, offset);
+    offset += size;
+  }
+  return undefined;
+}
+
 interface RawLevel {
   startAt: number;
   format: number;
@@ -71,6 +87,8 @@ interface RawLevel {
   indent: number;
   char: string;
   fontIndex?: number;
+  leftIndent?: number;
+  firstLineIndent?: number;
 }
 
 function readLevel(
@@ -91,6 +109,7 @@ function readLevel(
   if (format > 23 && format !== 255) return null;
   let cursor = offset + LVLF_SIZE;
   if (cursor + cbPapx + cbChpx + 2 > end) return null;
+  const grpprlPapx = table.subarray(cursor, cursor + cbPapx);
   cursor += cbPapx;
   const grpprlChpx = table.subarray(cursor, cursor + cbChpx);
   cursor += cbChpx;
@@ -111,6 +130,11 @@ function readLevel(
       indent,
       char,
       fontIndex: readLevelFontIndex(grpprlChpx),
+      // The level's paragraph properties carry the default indents that a
+      // paragraph inherits when its own PAPX does not set them. Both the Word 97
+      // and the Word 6/95 sprm spellings appear in real files.
+      leftIndent: readSprmValue(grpprlPapx, [0x840f, 0x845e]),
+      firstLineIndent: readSprmValue(grpprlPapx, [0x8411, 0x8460]),
     },
     next: cursor,
   };
@@ -232,6 +256,8 @@ export function parseLists(
       indent: level.indent,
       char: level.char,
       font: resolveLevelFont(level, fonts),
+      leftIndent: level.leftIndent,
+      firstLineIndent: level.firstLineIndent,
     })),
   });
 

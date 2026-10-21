@@ -1,5 +1,6 @@
 import { clampWordScale, isPositiveFinite, readWordFitViewport } from './wordViewport.js'
 import { defaultMsDocCss, parseMsDocToHtml, sanitizeMsDocHtml } from '@file-viewer/doc'
+import type { MsDocSection } from '@file-viewer/doc'
 
 import {
   applyPrintPageSize,
@@ -38,15 +39,15 @@ const WORD_PAGE_CSS = `
   gap:24px;
 }
 .msdoc-page{
-  width:min(100%,794px);
+  width:min(100%,var(--msdoc-page-width,794px));
   box-sizing:border-box;
 }
 .msdoc-page > .msdoc-root{
   box-sizing:border-box;
   width:100%;
   max-width:none;
-  min-height:1123px;
-  padding:clamp(24px,7%,96px) clamp(20px,6%,88px);
+  min-height:var(--msdoc-page-height,1123px);
+  padding:var(--msdoc-page-pad-top,clamp(24px,7%,96px)) var(--msdoc-page-pad-right,clamp(20px,6%,88px)) var(--msdoc-page-pad-bottom,clamp(24px,7%,96px)) var(--msdoc-page-pad-left,clamp(20px,6%,88px));
   background:#fff;
   border:1px solid #d9d9d9;
   box-shadow:0 1px 3px rgba(0,0,0,0.08), 0 12px 32px rgba(0,0,0,0.12);
@@ -192,12 +193,34 @@ function injectPageBreakMarkers(html: string): string {
   )
 }
 
-function wrapAsWordPages(html: string): string {
+function twipsToCssPx(value: number): string {
+  return `${Number((value / 15).toFixed(2))}px`
+}
+
+/**
+ * Legacy .doc pages carry their own paper geometry in the SEPX block. Expose it
+ * as CSS variables so the page shell can match the authored margins instead of
+ * the generic clamp() defaults.
+ */
+function sectionStyleVars(section?: MsDocSection): string {
+  if (!section || !section.pageWidth) return ''
+  return [
+    `--msdoc-page-width:${twipsToCssPx(section.pageWidth)}`,
+    `--msdoc-page-height:${twipsToCssPx(section.pageHeight)}`,
+    `--msdoc-page-pad-top:${twipsToCssPx(section.marginTop)}`,
+    `--msdoc-page-pad-right:${twipsToCssPx(section.marginRight)}`,
+    `--msdoc-page-pad-bottom:${twipsToCssPx(section.marginBottom)}`,
+    `--msdoc-page-pad-left:${twipsToCssPx(section.marginLeft + (section.gutter || 0))}`,
+  ].join(';')
+}
+
+function wrapAsWordPages(html: string, section?: MsDocSection): string {
   const normalizedHtml = injectPageBreakMarkers(html)
   const pages = normalizedHtml.split(PAGE_BREAK_MARKER)
+  const pageStyle = sectionStyleVars(section)
 
   return `<div class="msdoc-stage">${pages.map(page => (
-    `<section class="msdoc-page"><div class="msdoc-root">${page || EMPTY_PAGE_HTML}</div></section>`
+    `<section class="msdoc-page"${pageStyle ? ` style="${pageStyle}"` : ''}><div class="msdoc-root">${page || EMPTY_PAGE_HTML}</div></section>`
   )).join('')}</div>`
 }
 
@@ -453,7 +476,7 @@ export default async function render(buffer: ArrayBuffer, target: HTMLDivElement
 
 /** Shared page, zoom, export and cleanup boundary for legacy Word containers. */
 export function mountWordDocument(
-  rendered: { html: string; css: string }, target: HTMLDivElement, context?: FileRenderContext
+  rendered: { html: string; css: string; parsed?: { sections?: MsDocSection[] } }, target: HTMLDivElement, context?: FileRenderContext
 ): AppWrapper {
   const targetWindow = target.ownerDocument.defaultView
   if (!targetWindow) {
@@ -463,7 +486,7 @@ export function mountWordDocument(
   style.dataset.msdoc = ''
   style.textContent = `${rendered.css}\n${WORD_PAGE_CSS}`
   const content = target.ownerDocument.createElement('div')
-  content.append(sanitizeMsDocHtml(wrapAsWordPages(rendered.html), targetWindow))
+  content.append(sanitizeMsDocHtml(wrapAsWordPages(rendered.html, rendered.parsed?.sections?.[0]), targetWindow))
   target.replaceChildren(style, ...Array.from(content.childNodes))
   const disposeResponsive = makeMsDocResponsive(target)
   context?.registerExportAdapter?.({

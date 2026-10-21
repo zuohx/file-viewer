@@ -7,6 +7,7 @@ import { readChpxRuns, readPapxRuns, type ChpxRun } from './fkp.js';
 import { parseFonts } from './fonts.js';
 import { parseHtmlWordDocumentStream } from './html-word.js';
 import { parseLists } from './lists.js';
+import { parseSections } from './sections.js';
 import { extractObjectPool, extractPictureAsset } from './objects.js';
 import {
   applyTableStateToCells,
@@ -287,6 +288,13 @@ function buildInlineNodes(segments: CharSegment[], resolveAsset: (charState: Cha
             return { ...node, href } as InlineNode;
           });
         }
+        // PAGE results are computed at layout time. The cached value in the
+        // stream belongs to whichever page Word last laid out, so a preview
+        // that renders page one should show "1" instead.
+        const instruction = current.instruction.trim().toUpperCase();
+        if (instruction === 'PAGE' || instruction.startsWith('PAGE ')) {
+          nodes = [{ type: 'text', text: '1', style: segment.state }];
+        }
         for (const node of nodes) emitInline(fieldStack, output, node);
         continue;
       }
@@ -475,6 +483,10 @@ function buildParagraphModel(
     tableState,
     segments,
     inlines,
+    explicitIndents: {
+      leftIndent: directSplit.para.some((property) => property.name === 'leftIndent'),
+      firstLineIndent: directSplit.para.some((property) => property.name === 'firstLineIndent'),
+    },
   };
 }
 
@@ -730,8 +742,33 @@ function applyListMarkers(paragraphs: ParagraphModel[], lists: MsDocListTable): 
     series[levelIndex] = series[levelIndex] ? series[levelIndex] + 1 : startAt;
     for (let index = levelIndex + 1; index < series.length; index += 1) series[index] = 0;
     counters.set(String(listId), series);
+    // Word takes the level's indents unless the paragraph's own PAPX overrides
+    // them. Lists saved by Word carry the left indent only on the level, so
+    // without this merge every item sits at the cell edge instead of the
+    // authored text column.
+    const level = definition.levels[levelIndex];
+    const explicit = paragraph.explicitIndents;
+    if (level) {
+      if (!explicit?.leftIndent && level.leftIndent != null) {
+        paragraph.paraState.leftIndent = level.leftIndent;
+      }
+      if (!explicit?.firstLineIndent && level.firstLineIndent != null) {
+        paragraph.paraState.firstLineIndent = level.firstLineIndent;
+      }
+    }
     const marker = resolveListMarker(definition, levelIndex, series);
-    if (marker) paragraph.listMarker = marker;
+    if (marker) {
+      // Word puts the marker at the first line start and tabs forward to the
+      // hanging position; the tab stop equals the hanging width. Reserve only
+      // the gap between those two points, not the whole hanging width.
+      const leftIndent = paragraph.paraState.leftIndent ?? 0;
+      const hanging = -(paragraph.paraState.firstLineIndent ?? 0);
+      if (hanging > 0) {
+        const firstLineStart = Math.max(0, leftIndent + (paragraph.paraState.firstLineIndent ?? 0));
+        marker.markerWidthTwips = Math.max(0, hanging - firstLineStart);
+      }
+      paragraph.listMarker = marker;
+    }
   }
 }
 
@@ -965,11 +1002,23 @@ export function parseMsDoc(input: ArrayBuffer | Uint8Array | ArrayBufferView, op
     (story.kind === 'textbox' || story.kind === 'header-textbox')
     && normalizeParagraphText(documentText.slice(story.cpStart, story.cpEnd)).replace(/[\r\u0007]/g, '').trim().length > 0
   ));
+  // The header/footer story lives in the same text stream as the body. Word
+  // keeps a dozen CP-delimited variants (even/odd/first page); only the ones
+  // carrying visible text are worth rendering.
+  const headerStories = stories.filter((story) => (
+    story.kind === 'header'
+    && normalizeParagraphText(documentText.slice(story.cpStart, story.cpEnd)).replace(/[\r\u0007]/g, '').trim().length > 0
+  ));
 
   const styles = parseStyles(tableBytes, fib.fibRgFcLcb);
   const fonts = parseFonts(tableBytes, fib.fibRgFcLcb);
   const lists = parseLists(tableBytes, fib.fibRgFcLcb, fonts, warnings);
-  const relevantStoryEnd = Math.max(mainStory.cpEnd, ...supplementalTextStories.map((story) => story.cpEnd));
+  const sections = parseSections(wordBytes, tableBytes, fib.fibRgFcLcb);
+  const relevantStoryEnd = Math.max(
+    mainStory.cpEnd,
+    ...supplementalTextStories.map((story) => story.cpEnd),
+    ...headerStories.map((story) => story.cpEnd),
+  );
   const chpxRuns = readChpxRuns(wordBytes, tableBytes, fib, clx)
     .filter((run) => run.cpStart < relevantStoryEnd)
     .map((run) => ({ ...run, cpEnd: Math.min(run.cpEnd, relevantStoryEnd) }));
@@ -977,7 +1026,12 @@ export function parseMsDoc(input: ArrayBuffer | Uint8Array | ArrayBufferView, op
     .filter((run) => run.cpStart < relevantStoryEnd)
     .map((run) => ({ ...run, cpEnd: Math.min(run.cpEnd, relevantStoryEnd) }));
 
-  const ranges: Array<ParagraphRange & { storyKind: StoryRange['kind'] }> = [mainStory, ...supplementalTextStories]
+  // Story ranges must be walked in CP order: the character-property cursor is
+  // sequential, so feeding the header story ahead of body text would shift
+  // every following run's formatting.
+  const storyRanges = [mainStory, ...supplementalTextStories, ...headerStories]
+    .sort((left, right) => left.cpStart - right.cpStart);
+  const ranges: Array<ParagraphRange & { storyKind: StoryRange['kind'] }> = storyRanges
     .flatMap((story) => buildStoryParagraphRanges(story, documentText, papxRuns));
   if (supplementalTextStories.length) {
     pushWarning(
@@ -994,7 +1048,7 @@ export function parseMsDoc(input: ArrayBuffer | Uint8Array | ArrayBufferView, op
   const resolveAsset = createAssetResolver(dataBytes, objectPool, assets, usedAttachmentNames, assetCache, options);
   const chpxCursor = { index: 0 };
 
-  const paragraphs = ranges.flatMap((range) => {
+  const allParagraphs = ranges.flatMap((range) => {
     const rawParagraphText = getTextByCp(wordBytes, clx, pieceTexts, range.cpStart, range.cpEnd);
     const terminator = range.terminator === DOC_CONTROL.paragraph || range.terminator === DOC_CONTROL.cellMark ? range.terminator : '';
     const rawContent = terminator && rawParagraphText.endsWith(terminator)
@@ -1003,12 +1057,34 @@ export function parseMsDoc(input: ArrayBuffer | Uint8Array | ArrayBufferView, op
     const paragraphText = normalizeParagraphText(rawContent);
     const isTextBoxStory = range.storyKind === 'textbox' || range.storyKind === 'header-textbox';
     if ((rawContent.includes(DOC_CONTROL.textBoxPlaceholder) || isTextBoxStory) && !paragraphText.trim()) return [];
-    return [buildParagraphModel({ ...range, terminator }, paragraphText, styles, fonts, chpxRuns, resolveAsset, chpxCursor)];
+    // Header variants carry stray paragraph/field anchor control characters.
+    // Strip everything but the field delimiters, then drop the empty variants.
+    const headerText = range.storyKind === 'header'
+      ? paragraphText.replace(/[\u0000-\u001f]/g, (character) => (
+        character === '\u0013' || character === '\u0014' || character === '\u0015' ? character : ''
+      ))
+      : paragraphText;
+    // A header variant that only carries a field instruction has no visible
+    // content of its own; the rendered page number belongs to the full
+    // "第X页/共N页" paragraph that follows it.
+    if (range.storyKind === 'header' && !headerText.replace(/\u0013[^\u0013\u0015]*\u0015/g, '').trim()) return [];
+    return [buildParagraphModel({ ...range, terminator }, headerText, styles, fonts, chpxRuns, resolveAsset, chpxCursor)];
   });
+
+  const headerParagraphs = allParagraphs.filter((paragraph) => paragraph.storyKind === 'header');
+  const paragraphs = allParagraphs.filter((paragraph) => paragraph.storyKind !== 'header');
 
   normalizeRowEndOnlyTables(paragraphs);
   applyListMarkers(paragraphs, lists);
   const blocks = buildBlocks(paragraphs);
+  const headerBlocks: ParagraphBlock[] = [];
+  const footerBlocks: ParagraphBlock[] = [];
+  for (const paragraph of headerParagraphs) {
+    // Paragraphs that carry a PAGE field are page numbers, i.e. footer content
+    // that Word anchors to the bottom of the page.
+    if (/\u0013\s*PAGE/i.test(paragraph.text)) footerBlocks.push(paragraphToBlock(paragraph));
+    else headerBlocks.push(paragraphToBlock(paragraph));
+  }
   const trailingAttachments = Array.from(objectPool.values())
     .filter((item) => item?.attachment && !usedAttachmentNames.has(item.entry.name))
     .map((item) => item.attachment as AttachmentAsset);
@@ -1050,5 +1126,8 @@ export function parseMsDoc(input: ArrayBuffer | Uint8Array | ArrayBufferView, op
     blocks,
     assets,
     ...(Object.keys(lists).length ? { lists } : {}),
+    ...(sections.length ? { sections } : {}),
+    ...(headerBlocks.length ? { header: { blocks: headerBlocks } } : {}),
+    ...(footerBlocks.length ? { footer: { blocks: footerBlocks } } : {}),
   };
 }

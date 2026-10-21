@@ -10,6 +10,7 @@ import type {
   CssStyleObject,
   ImageAsset,
   InlineNode,
+  MsDocBlock,
   MsDocParseResult,
   MsDocRenderOptions,
   MsDocRenderResult,
@@ -49,6 +50,8 @@ interface RenderContext {
   externalLinkPolicy: ExternalLinkPolicy;
   externalResourcePolicy: ExternalResourcePolicy;
   fonts: ReadonlyMap<string, FontInfo>;
+  /** Width of the section text column in twips, derived from the page setup. */
+  contentWidthTwips?: number;
 }
 
 function styleObjectToCss(style: CssStyleObject): string {
@@ -174,7 +177,7 @@ function shadingToCss(shading: ShadingSpec | undefined): CssStyleObject {
     : { 'background-color': background };
 }
 
-function paragraphStyleToCss(paraState: ParagraphBlock['paraState']): CssStyleObject {
+function paragraphStyleToCss(paraState: ParagraphBlock['paraState'], fontSizePt?: number): CssStyleObject {
   const style: CssStyleObject = {
     'text-align': cssTextAlign(paraState.alignment),
   };
@@ -191,7 +194,12 @@ function paragraphStyleToCss(paraState: ParagraphBlock['paraState']): CssStyleOb
   const firstLineTwips = leftIndentTwips + hangingTwips < 0 ? -leftIndentTwips : hangingTwips;
   const textIndent = twipsToPx(firstLineTwips);
   if (marginTop) style['margin-top'] = `${marginTop}px`;
-  if (marginBottom) style['margin-bottom'] = `${marginBottom}px`;
+  // Word derives paragraph spacing from spacingBefore/spacingAfter alone. Emit
+  // the value even when it is zero so the stylesheet's fallback margin cannot
+  // inflate every paragraph of a document that declares no spacing.
+  style['margin-bottom'] = `${marginBottom}px`;
+  // line-height and em-based indents resolve against this, not the root font.
+  if (fontSizePt) style['font-size'] = `${fontSizePt}pt`;
   if (marginLeft) style['margin-left'] = `${marginLeft}px`;
   if (marginRight) style['margin-right'] = `${marginRight}px`;
   if (textIndent) style['text-indent'] = `${textIndent}px`;
@@ -464,13 +472,26 @@ function renderListMarker(marker: ParagraphListMarker): string {
   // geometric shapes and dingbats that Word bullets rely on.
   const style = styleObjectToCss({
     'font-family': '"Segoe UI Symbol","Apple Symbols","Noto Sans Symbols 2","Noto Sans",sans-serif',
+    // Word advances to the left indent with a tab after the marker; reserving
+    // the hanging width keeps the text column where the author placed it.
+    ...(marker.markerWidthTwips
+      ? { 'min-width': `${twipsToPx(marker.markerWidthTwips)}px`, 'margin-inline-end': '0' }
+      : {}),
   });
   return `<span class="msdoc-list-marker" aria-hidden="true"${style ? ` style="${style}"` : ''}>${escapeHtml(marker.text)}</span>`;
 }
 
+function paragraphFontSizePt(block: ParagraphBlock): number | undefined {
+  for (const inline of block.inlines || []) {
+    const halfPoints = inline.style?.fontSizeHalfPoints;
+    if (halfPoints) return halfPoints / 2;
+  }
+  return undefined;
+}
+
 function renderParagraphBlock(block: ParagraphBlock, context: RenderContext, options: { inline?: boolean } = {}): string {
   const tag = options.inline ? 'div' : 'p';
-  const style = styleObjectToCss(paragraphStyleToCss(block.paraState));
+  const style = styleObjectToCss(paragraphStyleToCss(block.paraState, paragraphFontSizePt(block)));
   const marker = block.listMarker ? renderListMarker(block.listMarker) : '';
   const body = renderInlineNodes(block.inlines || [], context);
   const empty = body || '<br>';
@@ -481,13 +502,16 @@ function renderParagraphBlock(block: ParagraphBlock, context: RenderContext, opt
   return `<${tag} class="${classNames.join(' ')}"${style ? ` style="${style}"` : ''}>${marker}${empty}</${tag}>`;
 }
 
-function cellStyle(cell: TableCellBlock): CssStyleObject {
+function cellStyle(cell: TableCellBlock, gridWidthTwips?: number): CssStyleObject {
   const style: CssStyleObject = {};
   const widthTwips = (cell.meta?.rightBoundary != null && cell.meta?.leftBoundary != null)
     ? cell.meta.rightBoundary - cell.meta.leftBoundary
     : cell.meta?.width;
-  const widthPx = twipsToPx(widthTwips);
-  if (widthPx) style.width = `${widthPx}px`;
+  // Percentages follow the authored proportions when the table is stretched to
+  // the text column; absolute px would pin the cell to the stored grid.
+  if (widthTwips && gridWidthTwips) {
+    style.width = `${Number(((widthTwips / gridWidthTwips) * 100).toFixed(4))}%`;
+  }
   if (cell.meta?.noWrap) style['white-space'] = 'nowrap';
   if (cell.meta?.fitText) style['text-align'] = 'justify';
   if (cell.meta?.vertAlign != null) style['vertical-align'] = cssVerticalAlign(cell.meta.vertAlign);
@@ -513,11 +537,26 @@ function cellStyle(cell: TableCellBlock): CssStyleObject {
   return style;
 }
 
-function tableStyle(block: TableBlock): CssStyleObject {
+function tableStyle(block: TableBlock, context: RenderContext): CssStyleObject {
   const style: CssStyleObject = {};
-  const widthPx = twipsToPx(block.gridWidthTwips || block.state?.tableWidth?.wWidth);
-  if (widthPx) style.width = `${widthPx}px`;
-  else style.width = '100%';
+  const declared = block.state?.tableWidth;
+  const gridPx = twipsToPx(block.gridWidthTwips);
+  const contentPx = twipsToPx(context.contentWidthTwips ?? 0);
+  // ftsWidth: 0/1 auto, 2 twips, 3 fiftieths of a percent.
+  if (declared?.ftsWidth === 2 && declared.wWidth) {
+    style.width = `${twipsToPx(declared.wWidth)}px`;
+  } else if (declared?.ftsWidth === 3 && declared.width) {
+    style.width = `${declared.width / 50}%`;
+  } else if (gridPx || contentPx) {
+    // An auto-width table stretches to the section text column; the TDefTable
+    // grid only describes relative column widths, and some producers (WPS)
+    // store a grid that is wider than the page itself.
+    style.width = '100%';
+    const limit = Math.min(gridPx || Number.POSITIVE_INFINITY, contentPx || Number.POSITIVE_INFINITY);
+    if (Number.isFinite(limit)) style['max-width'] = `${limit}px`;
+  } else {
+    style.width = '100%';
+  }
   const marginLeft = twipsToPx(block.state?.leftIndent);
   // Table justification wins over the indentation used by left-aligned tables.
   if (block.state?.alignment === 1) {
@@ -560,7 +599,14 @@ function renderTableColumns(block: TableBlock): string {
   }
   const sorted = [...boundaries].sort((a, b) => a - b);
   if (sorted.length < 2) return '';
-  return `<colgroup>${sorted.slice(1).map((right, i) => `<col style="width:${twipsToPx(right - sorted[i]!)}px">`).join('')}</colgroup>`;
+  const total = sorted[sorted.length - 1]! - sorted[0]!;
+  if (!total) return '';
+  // Percentages keep the authored column proportions when the table stretches
+  // to the section text column instead of its stored TDefTable width.
+  return `<colgroup>${sorted.slice(1).map((right, i) => {
+    const percent = ((right - sorted[i]!) / total) * 100;
+    return `<col style="width:${Number(percent.toFixed(4))}%">`;
+  }).join('')}</colgroup>`;
 }
 
 function renderCellBody(cell: TableCellBlock, context: RenderContext): string {
@@ -601,7 +647,7 @@ function renderTableBlock(block: TableBlock, context: RenderContext): string {
         const attrs: string[] = [];
         if ((cell.colspan ?? 1) > 1) attrs.push(` colspan="${cell.colspan}"`);
         if ((cell.rowspan ?? 1) > 1) attrs.push(` rowspan="${cell.rowspan}"`);
-        const style = styleObjectToCss(cellStyle(cell));
+        const style = styleObjectToCss(cellStyle(cell, block.gridWidthTwips));
         const body = renderCellBody(cell, context);
         return `<td class="msdoc-cell"${attrs.join('')}${style ? ` style="${style}"` : ''}>${body || '<div class="msdoc-paragraph"><br></div>'}</td>`;
       })
@@ -609,7 +655,7 @@ function renderTableBlock(block: TableBlock, context: RenderContext): string {
     return `<tr class="msdoc-row"${rowStyle}>${cells}</tr>`;
   }).join('');
 
-  return `<table class="msdoc-table msdoc-table-depth-${block.depth}" style="${styleObjectToCss(tableStyle(block))}">${renderTableColumns(block)}<tbody>${rows}</tbody></table>`;
+  return `<table class="msdoc-table msdoc-table-depth-${block.depth}" style="${styleObjectToCss(tableStyle(block, context))}">${renderTableColumns(block)}<tbody>${rows}</tbody></table>`;
 }
 
 function renderAttachmentsBlock(block: AttachmentsBlock): string {
@@ -629,7 +675,11 @@ export function defaultMsDocCss(): string {
 .msdoc-root{box-sizing:border-box;max-width:100%;padding:24px;background:#fff;color:#111;font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
 .msdoc-root *{box-sizing:border-box}
 .msdoc-paragraph{margin:0 0 8px;white-space:normal;word-break:break-word;overflow-wrap:anywhere}
-.msdoc-list-marker{display:inline-block;min-width:1.15em;margin-inline-end:.5em;white-space:nowrap}
+.msdoc-header{margin:0 0 1.2em}
+.msdoc-header .msdoc-paragraph{margin-bottom:0}
+.msdoc-footer{margin-top:1.2em}
+.msdoc-footer .msdoc-paragraph{margin-bottom:0}
+.msdoc-list-marker{display:inline-block;min-width:1.15em;margin-inline-end:.5em;white-space:nowrap;text-indent:0}
 .msdoc-line-at-least span,.msdoc-line-at-least ins,.msdoc-line-at-least del{line-height:normal}
 .msdoc-paragraph:last-child{margin-bottom:0}
 .msdoc-table{margin:12px 0;border-collapse:collapse;border-spacing:0;max-width:100%}
@@ -653,12 +703,17 @@ export function defaultMsDocCss(): string {
  */
 export function renderMsDoc(parsed: MsDocParseResult, options: MsDocRenderOptions = {}): MsDocRenderResult {
   const css = options.css ?? defaultMsDocCss();
+  const section = parsed.sections?.[0];
+  const contentWidthTwips = section && section.pageWidth
+    ? section.pageWidth - section.marginLeft - section.marginRight - (section.gutter || 0)
+    : undefined;
   const context: RenderContext = {
     reviewMode: options.reviewMode ?? 'all',
     externalLinkPolicy: options.externalLinkPolicy ?? 'block',
     externalResourcePolicy: options.externalResourcePolicy ?? 'block',
     fonts: new Map((parsed.fonts ?? []).flatMap(font =>
       [font.name, font.altName].filter(Boolean).map(name => [name, font] as const))),
+    contentWidthTwips,
   };
   const parts: string[] = [];
   let paragraphs: ParagraphBlock[] = [];
@@ -676,7 +731,15 @@ export function renderMsDoc(parsed: MsDocParseResult, options: MsDocRenderOption
     if (block.type === 'attachments') parts.push(renderAttachmentsBlock(block));
   }
   flushParagraphs();
-  const html = parts.join('');
+  const renderStory = (blocks: MsDocBlock[], tag: 'header' | 'footer'): string => {
+    const body = blocks
+      .map(block => block.type === 'paragraph' ? renderParagraphBlock(block, context) : '')
+      .join('');
+    return body ? `<${tag} class="msdoc-${tag}">${body}</${tag}>` : '';
+  };
+  const headerHtml = renderStory(parsed.header?.blocks ?? [], 'header');
+  const footerHtml = renderStory(parsed.footer?.blocks ?? [], 'footer');
+  const html = headerHtml + parts.join('') + footerHtml;
   return {
     html,
     css,

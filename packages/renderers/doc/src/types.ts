@@ -364,6 +364,10 @@ export interface MsDocListLevel {
   char: string;
   /** Resolved face of the marker glyph (Wingdings, Symbol, ...). */
   font?: string;
+  /** Default left indent the level applies when the paragraph does not set one (twips). */
+  leftIndent?: number;
+  /** Default first-line indent from the level definition (twips, negative = hanging). */
+  firstLineIndent?: number;
 }
 
 export interface MsDocListDefinition {
@@ -383,6 +387,11 @@ export interface ParagraphListMarker {
   kind: 'bullet' | 'number';
   /** Face the authored glyph came from, kept for diagnostics. */
   sourceFont?: string;
+  /**
+   * Hanging width in twips. Word advances to the left indent with a tab after
+   * the marker, so the text column must start that far from the first line.
+   */
+  markerWidthTwips?: number;
 }
 
 export interface Tcgrf {
@@ -724,6 +733,8 @@ export interface ParagraphModel {
   segments: CharSegment[];
   inlines: InlineNode[];
   listMarker?: ParagraphListMarker;
+  /** Indents the paragraph's own PAPX sets, so list-level defaults do not override them. */
+  explicitIndents?: { leftIndent: boolean; firstLineIndent: boolean };
 }
 
 export interface MsDocParseOptions {
@@ -767,6 +778,26 @@ export interface MsDocStyleSummary {
   next?: number;
 }
 
+export interface MsDocSection {
+  cpStart: number;
+  cpEnd: number;
+  /** Paper width in twips (11906 for A4). */
+  pageWidth: number;
+  pageHeight: number;
+  marginTop: number;
+  marginBottom: number;
+  marginLeft: number;
+  marginRight: number;
+  gutter: number;
+  headerDistance: number;
+  footerDistance: number;
+}
+
+export interface MsDocHeaderFooter {
+  /** Paragraphs from the header/footer story, in authored order. */
+  blocks: MsDocBlock[];
+}
+
 export interface MsDocParseResult {
   kind: 'msdoc';
   version: number;
@@ -776,6 +807,12 @@ export interface MsDocParseResult {
   styles: MsDocStyleSummary[];
   /** List definitions keyed by ilfo; absent when the document declares none. */
   lists?: MsDocListTable;
+  /** Section geometry (paper size and margins); empty when unspecified. */
+  sections?: MsDocSection[];
+  /** Header story content; absent when the document has none. */
+  header?: MsDocHeaderFooter;
+  /** Footer story content (page-number fields); absent when the document has none. */
+  footer?: MsDocHeaderFooter;
   blocks: MsDocBlock[];
   assets: MsDocAsset[];
 }
