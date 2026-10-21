@@ -120,6 +120,8 @@ const options = {
 
 `copyAssets.baseDir` 可以覆盖自动目录：必须是相对路径，不能包含 `..`；传空字符串表示显式复制到根目录。插件会为标准包、preset 和 full 包同步统一运行时资源根；full 包仍同时同步 `setDefaultFullAssetBaseUrl()`。只有设置 `inject:false` 且不手动导入虚拟模块时，业务才需要调用 `setDefaultFileViewerAssetBaseUrl()`（full 包同时调用 `setDefaultFullAssetBaseUrl()`）。Vite 配置了 `base:'/app/'` 时，full 包开发 URL 为 `/app/file-viewer/...`，构建文件仍位于 `outDir/file-viewer/`。
 
+资源复制在开发服务器启动/重启及生产构建结束时执行，不随普通 HMR 执行。内容相同的文件不会被重复写入，生成的清单不再包含易变的 `copiedAt` 时间戳。Vite 自身清空构建目录、复制 public 目录的行为保持不变。
+
 如果你需要严格控制 registry，可以关闭注入并手动传入：
 
 ```ts

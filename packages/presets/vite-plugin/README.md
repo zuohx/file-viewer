@@ -120,6 +120,8 @@ When host apps split `node_modules` by package name, circular dependencies betwe
 
 `copyAssets.baseDir` overrides automatic placement. It must be relative and cannot contain `..`; an empty string explicitly selects the root. The plugin now aligns the shared runtime asset base for standard packages, presets, and full packages; full packages also keep `setDefaultFullAssetBaseUrl()` synchronized. Only integrations that set `inject:false` and do not import the virtual module must call `setDefaultFileViewerAssetBaseUrl()` themselves (plus `setDefaultFullAssetBaseUrl()` for a full package). With Vite `base:'/app/'`, full-package dev URLs start with `/app/file-viewer/...`, while production files remain under `outDir/file-viewer/`.
 
+Asset copying runs at dev-server startup/restart and after a production build, not on ordinary HMR. Files with identical contents are left untouched, and generated manifests omit the volatile `copiedAt` timestamp. Vite's own output cleanup and public-directory copying remain unchanged.
+
 For strict registry control, disable injection and pass the virtual module explicitly:
 
 ```ts
