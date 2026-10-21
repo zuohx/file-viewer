@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto'
 import { existsSync } from 'node:fs'
 import { mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { basename, join, resolve } from 'node:path'
+import { basename, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { spawnSync } from 'node:child_process'
 
 export const PPT_RUNTIME_VERSION = '0.3.6'
@@ -23,6 +23,14 @@ export const PPT_RUNTIME_REQUIRED_FILES = Object.freeze([
 
 const fail = message => {
   throw new Error(`[ppt-runtime-integrity] ${message}`)
+}
+
+// Directory containment must be separator-agnostic. `resolve()` yields `\` on
+// Windows while the runtime prefix uses `/`, so a raw string prefix test
+// re-admits the vendor files themselves and reports them as duplicate runtimes.
+const isInsideDirectory = (parent, child) => {
+  const path = relative(parent, child)
+  return path !== '' && path !== '..' && !path.startsWith(`..${sep}`) && !isAbsolute(path)
 }
 
 const sha256 = async path => createHash('sha256').update(await readFile(path)).digest('hex')
@@ -203,12 +211,8 @@ export async function verifyPptRuntimeDistributionRoot(distributionRoot, options
     )
   }
   if (options.forbidBundledJavaScript) {
-    const runtimePrefix = `${resolve(runtimeRoot)}/`
     for (const path of files) {
-      if (
-        resolve(path).startsWith(runtimePrefix) ||
-        !/\.(?:m?js)$/i.test(path)
-      ) {
+      if (isInsideDirectory(runtimeRoot, path) || !/\.(?:m?js)$/i.test(path)) {
         continue
       }
       const source = await readFile(path, 'utf8')

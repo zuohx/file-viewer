@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url'
 import { test } from 'node:test'
 import * as webNode from '../../web/dist/node.js'
 import { assertFullAssetDependencies } from '../scripts/full-asset-dependencies.mjs'
-import { PPT_RUNTIME_VERSION } from '../scripts/ppt-runtime-integrity.mjs'
+import { PPT_RUNTIME_VERSION, verifyPptRuntimeDistributionRoot } from '../scripts/ppt-runtime-integrity.mjs'
 import { stagePptRuntimeFrom } from '../scripts/stage-ppt-runtime.mjs'
 import { fullAssetStagers, stageFullViewerAssets } from '../scripts/stage-full-assets.mjs'
 
@@ -18,6 +18,33 @@ const quiet = async run => {
   const log = console.log
   console.log = () => {}
   try { return await run() } finally { console.log = log }
+}
+
+// Minimal but integrity-valid @file-viewer/ppt runtime directory. Fixture bytes
+// keep the real verifier rules in play without shipping the 16 MiB CJK font.
+async function writePptRuntimeFixture(directory, version) {
+  const wasm = Buffer.from('unique wasm fixture bytes')
+  const font = Buffer.from('unique font fixture bytes, longer than the wasm')
+  await mkdir(directory, { recursive: true })
+  await writeFile(join(directory, 'ppt-native.wasm'), wasm)
+  await writeFile(join(directory, 'ppt-font-cjk.otf'), font)
+  await writeFile(join(directory, 'manifest.json'), JSON.stringify({
+    packageName: '@file-viewer/ppt', packageVersion: version,
+    wasmFile: 'ppt-native.wasm', wasmBytes: wasm.length, wasmSha256: sha256(wasm),
+    workerFile: 'worker.mjs',
+    fontPack: { file: 'ppt-font-cjk.otf', bytes: font.length, sha256: sha256(font) }
+  }))
+  await writeFile(join(directory, 'package.json'), JSON.stringify({ name: '@file-viewer/ppt', version }))
+  await writeFile(join(directory, 'index.mjs'), '// FV-PPT-PUBLIC-WATERMARKED-V2 createPptViewer ppt-native.wasm ppt-font-cjk.otf worker.mjs\n')
+  await writeFile(join(directory, 'worker.mjs'), "import './frame-cache.mjs'; // from './frame-cache.mjs'\n")
+  await writeFile(join(directory, 'frame-cache.mjs'), [
+    'export function normalizeFrameCacheLimits() {}',
+    'export function createFrameCacheKey() {}',
+    'export function createFrameCache() {}'
+  ].join('\n'))
+  await writeFile(join(directory, 'LICENSE'), 'ppt license fixture\n')
+  await writeFile(join(directory, 'NOTICE'), 'ppt notice fixture\n')
+  return { wasm, font }
 }
 
 // Every path the fixture touches lives inside one fresh temp directory made of
@@ -59,29 +86,7 @@ async function fixture(t) {
   await writeFile(join(source, 'vendor/ppt/ppt-native.wasm'), 'stale demo wasm copy')
 
   // Installed official @file-viewer/ppt package (fixture bytes, real integrity rules).
-  const wasm = Buffer.from('unique wasm fixture bytes')
-  const font = Buffer.from('unique font fixture bytes, longer than the wasm')
-  const writePpt = async version => {
-    await mkdir(installedPpt, { recursive: true })
-    await writeFile(join(installedPpt, 'ppt-native.wasm'), wasm)
-    await writeFile(join(installedPpt, 'ppt-font-cjk.otf'), font)
-    await writeFile(join(installedPpt, 'manifest.json'), JSON.stringify({
-      packageName: '@file-viewer/ppt', packageVersion: version,
-      wasmFile: 'ppt-native.wasm', wasmBytes: wasm.length, wasmSha256: sha256(wasm),
-      workerFile: 'worker.mjs',
-      fontPack: { file: 'ppt-font-cjk.otf', bytes: font.length, sha256: sha256(font) }
-    }))
-    await writeFile(join(installedPpt, 'package.json'), JSON.stringify({ name: '@file-viewer/ppt', version }))
-    await writeFile(join(installedPpt, 'index.mjs'), '// FV-PPT-PUBLIC-WATERMARKED-V2 createPptViewer ppt-native.wasm ppt-font-cjk.otf worker.mjs\n')
-    await writeFile(join(installedPpt, 'worker.mjs'), "import './frame-cache.mjs'; // from './frame-cache.mjs'\n")
-    await writeFile(join(installedPpt, 'frame-cache.mjs'), [
-      'export function normalizeFrameCacheLimits() {}',
-      'export function createFrameCacheKey() {}',
-      'export function createFrameCache() {}'
-    ].join('\n'))
-    await writeFile(join(installedPpt, 'LICENSE'), 'ppt license fixture\n')
-    await writeFile(join(installedPpt, 'NOTICE'), 'ppt notice fixture\n')
-  }
+  const writePpt = version => writePptRuntimeFixture(installedPpt, version)
   await writePpt(PPT_RUNTIME_VERSION)
 
   // The presentation renderer bundle that must not embed the PPT runtime.
@@ -128,6 +133,34 @@ test('a stale installed PPT package cannot enter the Full asset tree', async t =
   await f.writePpt('0.3.4')
   await assert.rejects(f.stage(), new RegExp(`version mismatch: manifest=0\\.3\\.4, package=0\\.3\\.4, expected=${PPT_RUNTIME_VERSION.replaceAll('.', '\\.')}`))
   assert.deepEqual(f.calls.map(call => call[0]), ['ppt'])
+})
+
+// The component demo publishes the runtime at file-viewer/vendor/ppt and runs the
+// bundled-JavaScript scan with forbidBundledJavaScript. Directory containment has
+// to survive the platform separator, otherwise the runtime's own entry points are
+// reported as duplicate copies of themselves.
+test('a runtime tree under a custom prefix is not reported as a bundled duplicate', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'ppt-runtime-prefix-'))
+  t.after(async () => {
+    assert.ok(resolve(root).startsWith(resolve(tmpdir()) + sep), 'Fixture root must stay in the temp directory')
+    await rm(root, { recursive: true, force: true })
+  })
+  const runtimePrefix = 'file-viewer/vendor/ppt'
+  await writePptRuntimeFixture(join(root, runtimePrefix), PPT_RUNTIME_VERSION)
+
+  // index.mjs and worker.mjs legitimately carry the runtime markers.
+  const verified = await verifyPptRuntimeDistributionRoot(root, { runtimePrefix, forbidBundledJavaScript: true })
+  assert.equal(verified.wasmCopies, 1)
+  assert.equal(verified.fontCopies, 1)
+
+  // A genuine copy outside the runtime tree is still rejected.
+  const duplicate = join(root, 'assets/duplicate.js')
+  await mkdir(dirname(duplicate), { recursive: true })
+  await writeFile(duplicate, '/* FV-PPT-PUBLIC-WATERMARKED-V2 */\n')
+  await assert.rejects(
+    verifyPptRuntimeDistributionRoot(root, { runtimePrefix, forbidBundledJavaScript: true }),
+    /contains a duplicate bundled @file-viewer\/ppt runtime/
+  )
 })
 
 test('bootstrap without a manifest produces valid, portable metadata for the final asset tree', async t => {
